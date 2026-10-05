@@ -5,6 +5,7 @@ use egui::{Align, Color32, Frame, Layout, Margin, Rect, Sense, UiBuilder, pos2, 
 use crate::app::App;
 use crate::i18n::{gettext, pgettext};
 use crate::model::{Action, Loadable};
+use crate::player::RepeatMode;
 use crate::theme::{self, Icon};
 
 use super::widgets;
@@ -1146,24 +1147,70 @@ fn big_cover(app: &mut App, ui: &mut egui::Ui, column: Rect, align: Align) {
     });
 }
 
-/// Previous, play or pause, and next, centred under the seek bar, since
-/// full screen has no player bar.
+/// Shuffle, previous, play or pause, next and repeat, centred under the seek
+/// bar, since full screen has no player bar. The toggles stay quiet until
+/// they are on, when they turn white with a small dot beneath, so the row
+/// reads as one calm cluster over the backdrop.
 fn playback_buttons(app: &mut App, ui: &mut egui::Ui, now: &crate::app::NowPlaying, width: f32) {
+    const ROW: f32 = 56.0;
+    const DISC: f32 = 56.0;
+    // Icon buttons occupy icon size + 12.
+    let widths = [30.0, 36.0, DISC, 36.0, 30.0];
+    let gap = 22.0;
+    let total: f32 = widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32;
     let top = ui.cursor().top();
-    let center = ui.cursor().left() + width / 2.0;
-    let row = Rect::from_center_size(pos2(center, top + 22.0), vec2(200.0, 44.0));
-    let mut row_ui = ui.new_child(
-        UiBuilder::new()
-            .max_rect(row)
-            .layout(Layout::left_to_right(Align::Center)),
+    let cy = top + ROW / 2.0;
+    let mut x = ui.cursor().left() + (width - total) / 2.0;
+    let slots = widths.map(|w| {
+        let rect = Rect::from_center_size(pos2(x + w / 2.0, cy), vec2(w, ROW));
+        x += w + gap;
+        rect
+    });
+    let cell = |ui: &mut egui::Ui, rect: Rect| {
+        ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
+        )
+    };
+    let quiet = Color32::from_white_alpha(150);
+    let soft = Color32::from_white_alpha(215);
+    let on_dot = |ui: &egui::Ui, rect: Rect| {
+        ui.painter()
+            .circle_filled(pos2(rect.center().x, cy + 17.0), 2.0, Color32::WHITE);
+    };
+
+    let shuffle = now.shuffle;
+    let mut c = cell(ui, slots[0]);
+    let response = theme::icon_button(
+        &mut c,
+        Icon::Shuffle,
+        18.0,
+        if shuffle { Color32::WHITE } else { quiet },
+        Color32::WHITE,
+        &gettext(app.locale, "Shuffle"),
     );
-    row_ui.spacing_mut().item_spacing.x = 28.0;
-    let quiet = Color32::from_white_alpha(200);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Checkbox,
+            c.is_enabled(),
+            shuffle,
+            gettext(app.locale, "Shuffle"),
+        )
+    });
+    if shuffle {
+        on_dot(ui, slots[0]);
+    }
+    if response.clicked() {
+        app.actions.push(Action::ToggleShuffle);
+    }
+
+    let mut c = cell(ui, slots[1]);
     if theme::icon_button(
-        &mut row_ui,
+        &mut c,
         Icon::SkipBackFilled,
-        22.0,
-        quiet,
+        24.0,
+        soft,
         Color32::WHITE,
         &gettext(app.locale, "Previous"),
     )
@@ -1171,29 +1218,46 @@ fn playback_buttons(app: &mut App, ui: &mut egui::Ui, now: &crate::app::NowPlayi
     {
         app.actions.push(Action::Previous);
     }
+
     let (icon, label) = if now.playing {
         (Icon::PauseFilled, gettext(app.locale, "Pause"))
     } else {
         (Icon::PlayFilled, gettext(app.locale, "Play"))
     };
+    let disc = slots[2];
+    ui.painter().add(
+        egui::epaint::Shadow {
+            offset: [0, 6],
+            blur: 24,
+            spread: 0,
+            color: Color32::from_black_alpha(90),
+        }
+        .as_shape(
+            Rect::from_center_size(disc.center(), egui::Vec2::splat(DISC)),
+            DISC / 2.0,
+        ),
+    );
+    let mut c = cell(ui, disc);
     if theme::circle_button(
-        &mut row_ui,
+        &mut c,
         icon,
-        44.0,
-        Color32::from_white_alpha(235),
+        DISC,
+        Color32::from_white_alpha(240),
         Color32::WHITE,
-        Color32::from_gray(20),
+        Color32::from_gray(18),
         &label,
     )
     .clicked()
     {
         app.actions.push(Action::TogglePlay);
     }
+
+    let mut c = cell(ui, slots[3]);
     if theme::icon_button(
-        &mut row_ui,
+        &mut c,
         Icon::SkipForwardFilled,
-        22.0,
-        quiet,
+        24.0,
+        soft,
         Color32::WHITE,
         &gettext(app.locale, "Next"),
     )
@@ -1201,9 +1265,32 @@ fn playback_buttons(app: &mut App, ui: &mut egui::Ui, now: &crate::app::NowPlayi
     {
         app.actions.push(Action::Next);
     }
+
+    let (icon, on, tooltip) = match now.repeat {
+        RepeatMode::Off => (Icon::Repeat, false, gettext(app.locale, "Repeat")),
+        RepeatMode::Context => (Icon::Repeat, true, gettext(app.locale, "Repeat one")),
+        RepeatMode::Track => (Icon::Repeat1, true, gettext(app.locale, "Repeat off")),
+    };
+    let repeat = slots[4];
+    let mut c = cell(ui, repeat);
+    if theme::icon_button(
+        &mut c,
+        icon,
+        18.0,
+        if on { Color32::WHITE } else { quiet },
+        Color32::WHITE,
+        &tooltip,
+    )
+    .clicked()
+    {
+        app.actions.push(Action::CycleRepeat);
+    }
+    if on {
+        on_dot(ui, repeat);
+    }
     ui.advance_cursor_after_rect(Rect::from_min_size(
         pos2(ui.cursor().left(), top),
-        vec2(width, 44.0),
+        vec2(width, ROW),
     ));
 }
 
