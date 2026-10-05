@@ -2707,6 +2707,7 @@ impl App {
                 album: now.album_name,
                 duration_ms: now.duration_ms,
             },
+            beautiful_lyrics: self.settings.beautiful_lyrics,
         })));
     }
 

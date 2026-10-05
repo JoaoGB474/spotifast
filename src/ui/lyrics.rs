@@ -146,10 +146,11 @@ fn timed_words(lyrics: &crate::lyrics::Lyrics, index: usize) -> Vec<TimedWord<'_
             .map(|(i, word)| TimedWord {
                 text: &word.text,
                 start: word.at_ms,
-                end: line
-                    .words
-                    .get(i + 1)
-                    .map_or(end, |next| next.at_ms.max(word.at_ms + 1)),
+                end: word
+                    .end_ms
+                    .or_else(|| line.words.get(i + 1).map(|next| next.at_ms))
+                    .unwrap_or(end)
+                    .max(word.at_ms + 1),
             })
             .collect();
     }
@@ -199,13 +200,31 @@ fn word_row(
         .map(|galley| galley.size().y)
         .fold(font.size * 1.2, f32::max);
     // Flow the words into rows, breaking before a word that would not fit.
-    let mut places = Vec::with_capacity(galleys.len());
+    let mut places: Vec<egui::Vec2> = Vec::with_capacity(galleys.len());
+    // Syllables of one word stay together: a row may only break after a
+    // piece that ends in a space.
     let (mut x, mut y) = (0.0f32, 0.0f32);
-    for (word, galley) in words.iter().zip(&galleys) {
+    let mut word_start = 0;
+    for (index, (word, galley)) in words.iter().zip(&galleys).enumerate() {
         let ink = layout_width(word.text, galley);
-        if x > 0.0 && x + ink > width {
-            x = 0.0;
-            y += row_height;
+        let starts_word = index == 0 || words[index - 1].text.ends_with(char::is_whitespace);
+        if starts_word {
+            word_start = index;
+        }
+        if x + ink > width && x > 0.0 {
+            if starts_word {
+                x = 0.0;
+                y += row_height;
+            } else if places[word_start].x > 0.0 {
+                // Move the whole word down to the next row.
+                let shift = places[word_start].x;
+                for place in &mut places[word_start..] {
+                    place.x -= shift;
+                    place.y += row_height;
+                }
+                x -= shift;
+                y += row_height;
+            }
         }
         places.push(vec2(x, y));
         x += galley.size().x;
@@ -1500,10 +1519,12 @@ mod tests {
             crate::lyrics::Word {
                 at_ms: 1_000,
                 text: "Hey ".into(),
+                end_ms: None,
             },
             crate::lyrics::Word {
                 at_ms: 1_800,
                 text: "you".into(),
+                end_ms: None,
             },
         ];
         let words = timed_words(&stamped, 0);

@@ -230,6 +230,9 @@ pub struct Settings {
     pub normalisation: bool,
     pub autoplay: bool,
     pub gapless: bool,
+    /// Ask Beautiful Lyrics' server for syllable-timed lyrics first. Off
+    /// unless chosen: the request carries the session's Spotify token.
+    pub beautiful_lyrics: bool,
     /// librespot backend name; `None` picks the platform default.
     pub audio_backend: Option<String>,
     pub audio_device: Option<String>,
@@ -418,6 +421,7 @@ impl Default for Settings {
             bitrate: 320,
             normalisation: false,
             autoplay: true,
+            beautiful_lyrics: false,
             gapless: true,
             audio_backend: None,
             audio_device: None,

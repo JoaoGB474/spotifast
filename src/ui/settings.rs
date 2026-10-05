@@ -441,6 +441,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let normalize_volume = gettext(locale, "Normalize volume");
     let autoplay = gettext(locale, "Autoplay");
     let gapless = gettext(locale, "Gapless playback");
+    let beautiful_lyrics = gettext(locale, "Syllable-timed lyrics from Beautiful Lyrics");
     let keep_playing = gettext(locale, "Keep music playing when the window closes");
     let update_checks = gettext(locale, "Automatic update checks");
     let audio_cache = gettext(locale, "Audio cache");
@@ -528,6 +529,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ),
         )
         .when(cfg!(target_os = "macos")),
+        RowText::new(
+            beautiful_lyrics.clone(),
+            gettext(
+                locale,
+                "Asks the Beautiful Lyrics server first, sending your Spotify session token. Unofficial, and it may stop working.",
+            ),
+        ),
     ];
     if section_matches(&needle, &playback, &playback_rows) {
         any_visible = true;
@@ -650,6 +658,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 if widgets::switch(ui, &palette, &gapless, &mut app.settings.gapless).changed() {
                     changed = true;
                     playback_dirty = true;
+                }
+            });
+            filtered_row(ui, &palette, &needle, &playback, &playback_rows[15], |ui| {
+                if widgets::switch(
+                    ui,
+                    &palette,
+                    &beautiful_lyrics,
+                    &mut app.settings.beautiful_lyrics,
+                )
+                .changed()
+                {
+                    changed = true;
+                    app.actions.push(crate::model::Action::RetryLyrics);
                 }
             });
             filtered_row(ui, &palette, &needle, &playback, &playback_rows[6], |ui| {

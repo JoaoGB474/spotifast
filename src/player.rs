@@ -496,6 +496,16 @@ impl Engine {
 
     /// Spotify's own transcription of a track, as the raw JSON its clients
     /// read; `Ok(None)` when Spotify has none, an error when asking failed.
+    /// The session's own access token, the one its Spotify requests carry.
+    pub async fn login_token(&self) -> Result<String> {
+        self.session
+            .login5()
+            .auth_token()
+            .await
+            .map(|token| token.access_token)
+            .map_err(|error| anyhow!("session token: {error}"))
+    }
+
     pub async fn lyrics_json(&self, track_uri: &str) -> Result<Option<serde_json::Value>> {
         let Some(id) = track_uri
             .rsplit(':')

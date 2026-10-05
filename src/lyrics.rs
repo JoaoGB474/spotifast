@@ -48,6 +48,103 @@ pub struct Line {
 pub struct Word {
     pub at_ms: u32,
     pub text: String,
+    /// When the word ends, when the source says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<u32>,
+}
+
+/// Where Beautiful Lyrics keeps its syllable-timed lyrics. Asked only when
+/// the setting is on: the request carries the session's Spotify token.
+pub const BEAUTIFUL_LYRICS_API: &str = "https://beautiful-lyrics.socalifornian.live/lyrics/";
+
+/// Parses a Beautiful Lyrics answer: syllable-timed, line-timed or
+/// untimed words, with interludes as empty timed lines. Times are in
+/// seconds.
+pub fn from_beautiful_lyrics(json: &serde_json::Value) -> Option<Lyrics> {
+    let ms = |value: Option<&serde_json::Value>| -> Option<u32> {
+        let seconds = value?.as_f64()?;
+        (seconds.is_finite() && seconds >= 0.0).then(|| (seconds * 1000.0).round() as u32)
+    };
+    let text_of = |value: &serde_json::Value| -> Option<String> {
+        Some(value.get("Text")?.as_str()?.to_string())
+    };
+    let kind = json.get("Type")?.as_str()?;
+    let mut lines = Vec::new();
+    match kind {
+        "Static" => {
+            for line in json.get("Lines")?.as_array()? {
+                lines.push(Line {
+                    at_ms: None,
+                    text: text_of(line)?.trim().to_string(),
+                    words: Vec::new(),
+                });
+            }
+        }
+        "Line" | "Syllable" => {
+            for item in json.get("Content")?.as_array()? {
+                let item_kind = item.get("Type").and_then(|value| value.as_str());
+                if item_kind == Some("Interlude") {
+                    lines.push(Line {
+                        at_ms: ms(item.get("StartTime")),
+                        text: String::new(),
+                        words: Vec::new(),
+                    });
+                    continue;
+                }
+                if kind == "Line" {
+                    lines.push(Line {
+                        at_ms: ms(item.get("StartTime")),
+                        text: text_of(item)?.trim().to_string(),
+                        words: Vec::new(),
+                    });
+                    continue;
+                }
+                let lead = item.get("Lead")?;
+                let mut words: Vec<Word> = Vec::new();
+                for syllable in lead.get("Syllables")?.as_array()? {
+                    let mut text = text_of(syllable)?;
+                    let joined = syllable
+                        .get("IsPartOfWord")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    if !joined {
+                        text.push(' ');
+                    }
+                    words.push(Word {
+                        at_ms: ms(syllable.get("StartTime"))?,
+                        text,
+                        end_ms: ms(syllable.get("EndTime")),
+                    });
+                }
+                if let Some(last) = words.last_mut() {
+                    last.text = last.text.trim_end().to_string();
+                }
+                words.retain(|word| !word.text.is_empty());
+                let text: String = words.iter().map(|word| word.text.as_str()).collect();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                lines.push(Line {
+                    at_ms: ms(lead.get("StartTime")).or(words.first().map(|word| word.at_ms)),
+                    text: text.trim().to_string(),
+                    words,
+                });
+            }
+        }
+        _ => return None,
+    }
+    if lines.iter().all(|line| line.text.is_empty()) {
+        return None;
+    }
+    let synced = kind != "Static" && lines.iter().all(|line| line.at_ms.is_some());
+    if synced {
+        lines.sort_by_key(|line| line.at_ms);
+    }
+    Some(Lyrics {
+        lines,
+        synced,
+        instrumental: false,
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -588,6 +685,7 @@ fn word_stamps(body: &str) -> (String, Vec<Word>) {
                     words.push(Word {
                         at_ms,
                         text: word.to_string(),
+                        end_ms: None,
                     });
                     text.push_str(word);
                 }
@@ -840,5 +938,67 @@ mod tests {
         );
         assert!(lines[1].words.is_empty());
         assert_eq!(lines[1].text, "Plain line");
+    }
+
+    /// Beautiful Lyrics' syllables become words that keep their own ends,
+    /// joined inside a word and spaced between words; interludes become
+    /// empty timed lines.
+    #[test]
+    fn beautiful_lyrics_syllables_become_timed_words() {
+        let json = serde_json::json!({
+            "Type": "Syllable",
+            "StartTime": 0.0,
+            "EndTime": 20.0,
+            "Content": [
+                { "Type": "Interlude", "StartTime": 0.0, "EndTime": 4.0 },
+                {
+                    "Type": "Vocal",
+                    "OppositeAligned": false,
+                    "Lead": {
+                        "StartTime": 4.0,
+                        "EndTime": 6.0,
+                        "Syllables": [
+                            { "Text": "Beau", "StartTime": 4.0, "EndTime": 4.3, "IsPartOfWord": true },
+                            { "Text": "ti", "StartTime": 4.3, "EndTime": 4.5, "IsPartOfWord": true },
+                            { "Text": "ful", "StartTime": 4.5, "EndTime": 4.9, "IsPartOfWord": false },
+                            { "Text": "day", "StartTime": 5.0, "EndTime": 6.0, "IsPartOfWord": false }
+                        ]
+                    }
+                }
+            ]
+        });
+        let lyrics = from_beautiful_lyrics(&json).unwrap();
+        assert!(lyrics.synced);
+        assert_eq!(lyrics.lines.len(), 2);
+        assert_eq!(lyrics.lines[0].text, "");
+        assert_eq!(lyrics.lines[0].at_ms, Some(0));
+        let line = &lyrics.lines[1];
+        assert_eq!(line.text, "Beautiful day");
+        assert_eq!(line.at_ms, Some(4_000));
+        let words: Vec<(&str, u32, Option<u32>)> = line
+            .words
+            .iter()
+            .map(|word| (word.text.as_str(), word.at_ms, word.end_ms))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                ("Beau", 4_000, Some(4_300)),
+                ("ti", 4_300, Some(4_500)),
+                ("ful ", 4_500, Some(4_900)),
+                ("day", 5_000, Some(6_000)),
+            ]
+        );
+
+        let lines = serde_json::json!({
+            "Type": "Line",
+            "Content": [{ "Type": "Vocal", "StartTime": 1.5, "EndTime": 3.0, "Text": "Hello" }]
+        });
+        let lyrics = from_beautiful_lyrics(&lines).unwrap();
+        assert_eq!(lyrics.lines[0].at_ms, Some(1_500));
+        assert!(lyrics.lines[0].words.is_empty());
+
+        let plain = serde_json::json!({ "Type": "Static", "Lines": [{ "Text": "Words" }] });
+        assert!(!from_beautiful_lyrics(&plain).unwrap().synced);
     }
 }

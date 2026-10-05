@@ -744,6 +744,8 @@ pub struct LyricsRequest {
     /// The track the answer is for, so a stale one is ignored.
     pub uri: String,
     pub query: crate::lyrics::Query,
+    /// Ask Beautiful Lyrics first, for syllable timing.
+    pub beautiful_lyrics: bool,
 }
 
 pub enum Event {
@@ -3146,7 +3148,17 @@ impl Worker {
             // Spotify's own words go first: they follow the recording
             // exactly. Everything else, a signed-out session included,
             // falls back to LRCLIB.
-            let result = match spotify_lyrics(engine, &request.uri, &cache_dir).await {
+            let beautiful = match (&http, request.beautiful_lyrics) {
+                (Ok(http), true) => {
+                    beautiful_lyrics(engine.clone(), http, &request.uri, &cache_dir).await
+                }
+                _ => None,
+            };
+            let spotify = match beautiful {
+                Some(found) => Some(found),
+                None => spotify_lyrics(engine, &request.uri, &cache_dir).await,
+            };
+            let result = match spotify {
                 Some(found) => Ok(Some(found)),
                 None => match http {
                     Ok(http) => crate::lyrics::fetch(&http, &cache_dir, &request.query)
@@ -3987,6 +3999,52 @@ fn settle<T>(result: Result<T, session_reads::Failure>) -> Option<ApiResult<T>> 
             None
         }
     }
+}
+
+/// Beautiful Lyrics' syllable-timed words for the track, asked with the
+/// local session's Spotify token. Answers are cached, "none" included;
+/// `None` falls back to Spotify's own lyrics.
+async fn beautiful_lyrics(
+    engine: Option<Arc<Engine>>,
+    http: &reqwest::Client,
+    uri: &str,
+    cache_dir: &std::path::Path,
+) -> Option<crate::lyrics::Lyrics> {
+    let id = uri.strip_prefix("spotify:track:")?;
+    let path = cache_dir.join(format!("beautiful-{id}.json"));
+    if let Some(cached) = crate::lyrics::cached(&path) {
+        return cached;
+    }
+    let token = match engine?.login_token().await {
+        Ok(token) => token,
+        Err(error) => {
+            log::debug!("beautiful lyrics: no session token: {error:#}");
+            return None;
+        }
+    };
+    let response = http
+        .get(format!("{}{id}", crate::lyrics::BEAUTIFUL_LYRICS_API))
+        .bearer_auth(token)
+        .send()
+        .await;
+    let response = match response {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            log::debug!("beautiful lyrics answered {}", response.status());
+            return None;
+        }
+        Err(error) => {
+            log::debug!("beautiful lyrics unreachable: {error:#}");
+            return None;
+        }
+    };
+    let text = response.text().await.ok()?;
+    let found = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .as_ref()
+        .and_then(crate::lyrics::from_beautiful_lyrics);
+    crate::lyrics::store(&path, &found);
+    found
 }
 
 /// Spotify's transcription of the track, when the local session can ask for
