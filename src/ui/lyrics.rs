@@ -1,5 +1,6 @@
 //! The words of the playing track, in a side panel that follows the song.
 
+use egui::emath::TSTransform;
 use egui::{Align, Color32, Frame, Layout, Margin, Rect, Sense, UiBuilder, pos2, vec2};
 
 use crate::app::App;
@@ -8,6 +9,7 @@ use crate::model::{Action, Loadable};
 use crate::player::RepeatMode;
 use crate::theme::{self, Icon};
 
+use super::lyrics_fx::{self, Glow, light};
 use super::widgets;
 
 const LINE_SIZE: f32 = 22.0;
@@ -50,6 +52,41 @@ const SWEEP_MIN_MS: u32 = 1_200;
 const SWEEP_PER_CHAR_MS: u32 = 80;
 /// A pause this long before the first line shows the interlude dots.
 const INTRO_DOTS_MS: u32 = 2_500;
+/// How small a line waits, in full screen, before it grows to be sung.
+const IDLE_SCALE: f32 = 0.9;
+/// How long a word takes to swell as it starts, and to settle after it.
+const POP_IN_MS: f32 = 140.0;
+const POP_OUT_MS: f32 = 420.0;
+/// A word held longer than this is a long note, and swells further.
+const LONG_NOTE_MS: f32 = 700.0;
+
+/// A zoom by `scale` that leaves `pivot` where it is.
+fn zoom_about(pivot: egui::Pos2, scale: f32) -> TSTransform {
+    TSTransform::new(pivot.to_vec2() * (1.0 - scale), scale)
+}
+
+/// Paints `galley` at `pos` as laid out, then moved and scaled by `zoom`.
+fn paint_galley(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    galley: &std::sync::Arc<egui::Galley>,
+    color: Color32,
+    zoom: TSTransform,
+) {
+    if zoom == TSTransform::IDENTITY {
+        painter.galley_with_override_text_color(pos, galley.clone(), color);
+        return;
+    }
+    let mut shape =
+        egui::epaint::TextShape::new(pos, galley.clone(), color).with_override_text_color(color);
+    shape.transform(zoom);
+    painter.add(shape);
+}
+
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
 
 /// What one row of the lyrics shows this frame.
 #[derive(Clone, Copy)]
@@ -61,6 +98,9 @@ struct Look {
     sung: f32,
     /// Lines between this one and the one being sung.
     distance: usize,
+    /// The song's pulse, in full screen: the line grows as it is sung, and
+    /// its words swell and glow in the cover's colour.
+    glow: Option<Glow>,
 }
 
 fn idle_opacity(distance: usize, hovered: bool) -> f32 {
@@ -73,10 +113,6 @@ fn idle_opacity(distance: usize, hovered: bool) -> f32 {
 /// How bright the glow behind the sung words is: it rises over the first
 /// half of the line, holds, and lets go as the line ends.
 fn glow(sung: f32) -> f32 {
-    let smooth = |t: f32| {
-        let t = t.clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    };
     if sung < 0.5 {
         smooth(sung / 0.5)
     } else if sung < 0.925 {
@@ -238,51 +274,107 @@ fn word_row(
     let hovered = response.hovered() && sense.senses_click();
     let idle = idle_opacity(look.distance, hovered);
     let base = idle + (IDLE_OPACITY.max(idle) - idle) * look.lit;
-    let light =
+    let light_text =
         u32::from(look.color.r()) + u32::from(look.color.g()) + u32::from(look.color.b()) > 3 * 128;
     let lift_by = font.size * 0.06;
+    // In full screen the line grows from the left as it becomes the one
+    // being sung.
+    let line_zoom = match look.glow {
+        Some(_) => zoom_about(
+            pos2(rect.left(), rect.center().y),
+            IDLE_SCALE + (1.0 - IDLE_SCALE) * smooth(look.lit),
+        ),
+        None => TSTransform::IDENTITY,
+    };
+    if let Some(pulse) = look.glow
+        && look.lit > 0.01
+    {
+        // A wide, faint light behind the whole line.
+        let extent = words
+            .iter()
+            .zip(&galleys)
+            .zip(&places)
+            .map(|((word, galley), place)| place.x + layout_width(word.text, galley))
+            .fold(0.0, f32::max);
+        lyrics_fx::paint_blob(
+            &painter,
+            line_zoom * pos2(rect.left() + extent / 2.0, rect.center().y),
+            vec2(extent * 0.62 + row_height, height * 0.75 + row_height * 0.4),
+            light(pulse.accent, 0.05 * look.lit * (0.6 + 0.6 * pulse.bass)),
+        );
+    }
     for ((word, galley), place) in words.iter().zip(&galleys).zip(&places) {
-        let sung = (position_ms.saturating_sub(word.start) as f32
-            / word.end.saturating_sub(word.start).max(1) as f32)
-            .clamp(0.0, 1.0);
+        let length = word.end.saturating_sub(word.start).max(1) as f32;
+        let sung = (position_ms.saturating_sub(word.start) as f32 / length).clamp(0.0, 1.0);
         let sung = if look.sung >= 1.0 { 1.0 } else { sung };
         // A word rises as it is sung and stays up until the line lets go.
         let eased = sung * sung * (3.0 - 2.0 * sung);
         let lift = lift_by * eased * look.lit;
         let pos = rect.min + *place - vec2(0.0, lift);
-        painter.galley_with_override_text_color(
-            pos,
-            galley.clone(),
-            look.color.gamma_multiply(base),
-        );
+        let ink = layout_width(word.text, galley);
+        let word_rect = Rect::from_min_size(pos, vec2(ink, galley.size().y));
+        // In full screen the word also swells while it is sung, more on a
+        // long note, and settles once the next word takes over.
+        let held = ((length - LONG_NOTE_MS) / 1_500.0).clamp(0.0, 1.0);
+        let pop = if look.glow.is_some() && position_ms >= word.start && look.sung < 1.0 {
+            let since = position_ms.saturating_sub(word.start) as f32;
+            let after = position_ms.saturating_sub(word.end) as f32;
+            smooth(since / POP_IN_MS)
+                * (1.0 - smooth(after / POP_OUT_MS))
+                * (1.0 - held * 0.4 * (1.0 - sung))
+                * look.lit
+        } else {
+            0.0
+        };
+        let zoom = line_zoom
+            * zoom_about(
+                pos2(word_rect.center().x, word_rect.bottom()),
+                1.0 + (0.045 + 0.075 * held) * pop,
+            );
+        if let Some(pulse) = look.glow
+            && pop > 0.01
+        {
+            let strength = (0.15 + 0.14 * pulse.bass + 0.1 * pulse.beat + 0.12 * held) * pop;
+            lyrics_fx::paint_blob(
+                &painter,
+                zoom * word_rect.center(),
+                vec2(ink * 0.6 + row_height * 0.8, row_height * 0.95) * (1.0 + 0.25 * pulse.bass),
+                light(lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.2), strength),
+            );
+        }
+        paint_galley(&painter, pos, galley, look.color.gamma_multiply(base), zoom);
         if look.lit <= 0.001 || sung <= 0.0 {
             continue;
         }
         let bright = look.color.gamma_multiply(look.lit);
-        let ink = layout_width(word.text, galley);
-        let word_rect = Rect::from_min_size(pos, vec2(ink, galley.size().y));
         let feather = (row_height * 0.6).min(ink.max(1.0));
         let front = sung * (ink + feather);
-        let glow_alpha = if light { glow(sung) * look.lit } else { 0.0 };
+        let glow_alpha = if light_text {
+            glow(sung) * look.lit
+        } else {
+            0.0
+        };
         let solid = Rect::from_x_y_ranges(
             word_rect.left()..=word_rect.left() + (front - feather).clamp(0.0, ink),
-            word_rect.top() - lift_by..=word_rect.bottom() + lift_by,
+            word_rect.top() - row_height * 0.2..=word_rect.bottom() + row_height * 0.2,
         );
         if solid.width() > 0.0 {
-            let clipped = painter.with_clip_rect(solid.intersect(painter.clip_rect()));
+            let clipped = painter.with_clip_rect((zoom * solid).intersect(painter.clip_rect()));
             if glow_alpha > 0.01 {
                 let halo = look.color.gamma_multiply(0.09 * glow_alpha);
                 let radius = row_height * 0.1;
                 for step in 0..8 {
                     let angle = step as f32 * std::f32::consts::TAU / 8.0;
-                    clipped.galley_with_override_text_color(
+                    paint_galley(
+                        &clipped,
                         pos + vec2(angle.cos(), angle.sin()) * radius,
-                        galley.clone(),
+                        galley,
                         halo,
+                        zoom,
                     );
                 }
             }
-            clipped.galley_with_override_text_color(pos, galley.clone(), bright);
+            paint_galley(&clipped, pos, galley, bright, zoom);
         }
         for strip in 0..SWEEP_STRIPS {
             let from = front - feather + feather * strip as f32 / SWEEP_STRIPS as f32;
@@ -296,9 +388,39 @@ fn word_row(
                 solid.y_range(),
             );
             let alpha = 1.0 - (strip as f32 + 0.5) / SWEEP_STRIPS as f32;
-            painter
-                .with_clip_rect(clip.intersect(painter.clip_rect()))
-                .galley_with_override_text_color(pos, galley.clone(), bright.gamma_multiply(alpha));
+            paint_galley(
+                &painter.with_clip_rect((zoom * clip).intersect(painter.clip_rect())),
+                pos,
+                galley,
+                bright.gamma_multiply(alpha),
+                zoom,
+            );
+        }
+        // A glint of light rides the front of the sweep across the word.
+        if let Some(pulse) = look.glow
+            && sung < 1.0
+        {
+            let strength = (sung * 8.0).min(1.0) * ((1.0 - sung) * 8.0).min(1.0) * look.lit;
+            let at = zoom
+                * pos2(
+                    word_rect.left() + (front - feather * 0.5).clamp(0.0, ink),
+                    word_rect.center().y,
+                );
+            lyrics_fx::paint_blob(
+                &painter,
+                at,
+                vec2(row_height * 0.5, row_height * 0.75),
+                light(Color32::WHITE, 0.16 * strength),
+            );
+            lyrics_fx::paint_blob(
+                &painter,
+                at,
+                vec2(row_height * 0.1, row_height * 0.95),
+                light(
+                    lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.55),
+                    0.4 * strength,
+                ),
+            );
         }
     }
     response
@@ -366,7 +488,19 @@ fn paint_lyric(
     let painter = ui.painter();
     let idle = idle_opacity(look.distance, hovered);
     let base = idle + (IDLE_OPACITY.max(idle) - idle) * look.lit;
-    painter.galley_with_override_text_color(pos, galley.clone(), look.color.gamma_multiply(base));
+    // In full screen the line grows, from the side it starts on, as it
+    // becomes the one being sung.
+    let zoom = match look.glow {
+        Some(_) => zoom_about(
+            pos2(
+                if rtl { rect.right() } else { rect.left() },
+                rect.center().y,
+            ),
+            IDLE_SCALE + (1.0 - IDLE_SCALE) * smooth(look.lit),
+        ),
+        None => TSTransform::IDENTITY,
+    };
+    paint_galley(painter, pos, galley, look.color.gamma_multiply(base), zoom);
     if look.lit <= 0.001 {
         return;
     }
@@ -412,16 +546,16 @@ fn paint_lyric(
         };
         let solid = span(0.0, front - feather);
         if solid.width() > 0.0 {
-            let clipped = painter.with_clip_rect(solid.intersect(painter.clip_rect()));
+            let clipped = painter.with_clip_rect((zoom * solid).intersect(painter.clip_rect()));
             if glow_alpha > 0.01 {
                 let halo = look.color.gamma_multiply(0.07 * glow_alpha);
                 for step in 0..8 {
                     let angle = step as f32 * std::f32::consts::TAU / 8.0;
                     let offset = vec2(angle.cos(), angle.sin()) * glow_radius;
-                    clipped.galley_with_override_text_color(pos + offset, galley.clone(), halo);
+                    paint_galley(&clipped, pos + offset, galley, halo, zoom);
                 }
             }
-            clipped.galley_with_override_text_color(pos, galley.clone(), bright);
+            paint_galley(&clipped, pos, galley, bright, zoom);
         }
         for strip in 0..SWEEP_STRIPS {
             let from = front - feather + feather * strip as f32 / SWEEP_STRIPS as f32;
@@ -431,16 +565,27 @@ fn paint_lyric(
                 continue;
             }
             let alpha = 1.0 - (strip as f32 + 0.5) / SWEEP_STRIPS as f32;
-            painter
-                .with_clip_rect(clip.intersect(painter.clip_rect()))
-                .galley_with_override_text_color(pos, galley.clone(), bright.gamma_multiply(alpha));
+            paint_galley(
+                &painter.with_clip_rect((zoom * clip).intersect(painter.clip_rect())),
+                pos,
+                galley,
+                bright.gamma_multiply(alpha),
+                zoom,
+            );
         }
     }
 }
 
 /// Three dots for a gap in the singing, filling one after another through
 /// the gap and breathing while they wait. Collapsed when not current.
-fn interlude_row(ui: &mut egui::Ui, color: Color32, size: f32, lit: f32, through: f32) {
+fn interlude_row(
+    ui: &mut egui::Ui,
+    color: Color32,
+    size: f32,
+    lit: f32,
+    through: f32,
+    pulse: Option<Glow>,
+) {
     let height = size * 1.1 * lit;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
     if lit <= 0.01 || !ui.is_rect_visible(rect) {
@@ -453,13 +598,25 @@ fn interlude_row(ui: &mut egui::Ui, color: Color32, size: f32, lit: f32, through
     // At the end of the gap the dots grow a little and then shrink away
     // as the next line comes in.
     let ending = ((through - 0.88) / 0.12).clamp(0.0, 1.0);
-    let scale = lit * breathe * (1.0 + 0.15 * ending - 1.15 * ending * ending);
+    // In full screen the dots also jump on the beat.
+    let kick = pulse.map_or(0.0, |pulse| 0.22 * pulse.beat + 0.1 * pulse.bass);
+    let scale = lit * (breathe + kick) * (1.0 + 0.15 * ending - 1.15 * ending * ending);
     let center_y = rect.center().y;
     for dot in 0..3 {
         let fill = (through * 3.0 - dot as f32).clamp(0.0, 1.0);
         let center = pos2(rect.left() + radius + 2.0 + gap * dot as f32, center_y);
         let alpha = (0.35 + 0.65 * fill) * lit;
         let r = radius * scale.max(0.0);
+        if let Some(pulse) = pulse
+            && fill > 0.0
+        {
+            lyrics_fx::paint_blob(
+                ui.painter(),
+                center,
+                egui::Vec2::splat(r * 4.5),
+                light(pulse.accent, (0.14 + 0.2 * pulse.beat) * fill * lit),
+            );
+        }
         if fill > 0.0 {
             ui.painter()
                 .circle_filled(center, r * 1.6, color.gamma_multiply(0.08 * fill * lit));
@@ -470,8 +627,15 @@ fn interlude_row(ui: &mut egui::Ui, color: Color32, size: f32, lit: f32, through
 }
 
 /// The blurred cover, drawn as a few slowly turning layers so the colours
-/// drift behind the words.
-fn dynamic_backdrop(painter: &egui::Painter, rect: Rect, texture: &egui::TextureHandle, time: f32) {
+/// drift behind the words. They swell with the bass and turn faster while
+/// the song is loud, and brighter copies sweep across on top as light.
+fn dynamic_backdrop(
+    painter: &egui::Painter,
+    rect: Rect,
+    texture: &egui::TextureHandle,
+    fx: &lyrics_fx::Fx,
+    time: f32,
+) {
     painter.image(
         texture.id(),
         rect,
@@ -493,9 +657,10 @@ fn dynamic_backdrop(painter: &egui::Painter, rect: Rect, texture: &egui::Texture
             (time * 0.045 + phase).sin() * 0.09,
             (time * 0.035 + phase * 1.3).cos() * 0.07,
         );
-        let breathe = 1.0 + 0.06 * (time * 0.11 + phase).sin();
+        let breathe = 1.0 + 0.06 * (time * 0.11 + phase).sin() + 0.07 * fx.bass;
         let center = rect.min + (at + drift) * rect.size();
-        let angle = time * speed + phase;
+        let angle = (time + fx.flow * 1.5) * speed + phase;
+        let gray = (gray as f32 + 38.0 * fx.beat).min(255.0) as u8;
         paint_disc(
             painter,
             texture.id(),
@@ -503,6 +668,30 @@ fn dynamic_backdrop(painter: &egui::Painter, rect: Rect, texture: &egui::Texture
             reach * radius * breathe,
             angle,
             Color32::from_gray(gray),
+        );
+    }
+    // The same colours again as light, circling faster and flaring on the
+    // beat.
+    let lights = [
+        (0.0, 0.33, 0.21, 0.4),
+        (2.1, -0.27, 0.3, 0.34),
+        (4.2, 0.19, -0.26, 0.3),
+    ];
+    let strength = 0.05 + 0.11 * fx.level + 0.14 * fx.beat;
+    for (phase, turn, orbit, radius) in lights {
+        let around = fx.flow * orbit + phase;
+        let center = rect.center()
+            + vec2(
+                around.cos() * rect.width() * 0.34,
+                (around * 1.3).sin() * rect.height() * 0.3,
+            );
+        paint_disc(
+            painter,
+            texture.id(),
+            center,
+            reach * radius * (1.0 + 0.18 * fx.bass),
+            fx.flow * turn + phase,
+            light(Color32::WHITE, strength),
         );
     }
 }
@@ -569,6 +758,8 @@ struct LinesStyle {
     viewport: Option<Rect>,
     /// Let keyboard scrolling step through the rows.
     autoscroll_rows: bool,
+    /// The song's pulse, for the full screen's larger gestures.
+    glow: Option<Glow>,
 }
 
 struct LinesDrawn {
@@ -606,6 +797,7 @@ fn lines(
             style.size,
             lit,
             gap_fraction(lyrics, None, now.position_ms),
+            style.glow,
         );
         if lit > 0.0 {
             ui.add_space(style.gap * lit);
@@ -626,7 +818,7 @@ fn lines(
         if line.text.trim().is_empty() && lyrics.synced {
             let through = gap_fraction(lyrics, Some(index), now.position_ms);
             let top = ui.cursor().top();
-            interlude_row(ui, style.color, style.size, lit, through);
+            interlude_row(ui, style.color, style.size, lit, through, style.glow);
             if lit > 0.0 {
                 ui.add_space(style.gap * lit);
             }
@@ -668,6 +860,7 @@ fn lines(
             lit: if lyrics.synced { lit } else { 1.0 },
             sung: if lyrics.synced { sung } else { 1.0 },
             distance: if lyrics.synced { distance } else { 0 },
+            glow: style.glow.filter(|_| lyrics.synced),
         };
         let sense = if lyrics.synced {
             Sense::click()
@@ -889,6 +1082,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                     animation: None,
                     viewport: None,
                     autoscroll_rows: true,
+                    glow: None,
                 },
             );
             animating = drawn.animating;
@@ -977,7 +1171,7 @@ pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// The widest the lyrics get beside the cover, so lines stay easy to read.
-const LYRICS_BESIDE_WIDTH: f32 = 640.0;
+const LYRICS_BESIDE_WIDTH: f32 = 720.0;
 
 /// Room under the big cover for the title, artists and seek bar.
 const COVER_CAPTION: f32 = 196.0;
@@ -1096,6 +1290,18 @@ fn big_cover(app: &mut App, ui: &mut egui::Ui, column: Rect, align: Align) {
     let side = column.width();
     let cover = Rect::from_min_size(column.min, vec2(side, side));
     let radius = 14.0;
+    // The cover's own colour glows behind it, swelling with the bass, and
+    // each beat nudges the cover and sends a ring of light out from it.
+    let fx = &app.lyrics_fx;
+    let (low, _) = fx.colors;
+    lyrics_fx::paint_blob(
+        ui.painter(),
+        cover.center(),
+        egui::Vec2::splat(side * (0.86 + 0.14 * fx.bass)),
+        light(low, 0.1 + 0.13 * fx.bass + 0.1 * fx.beat),
+    );
+    fx.rings(ui.painter(), cover.center(), side * 0.5, side * 1.3, low);
+    let cover = cover.expand(side * 0.01 * fx.beat);
     ui.painter().add(
         egui::epaint::Shadow {
             offset: [0, 24],
@@ -1363,21 +1569,40 @@ fn preferred_backdrop_art(small: Option<String>, large: Option<String>) -> Optio
 
 fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
     theme::apply_local(ui, &theme::Palette::dark());
-    let art = app
-        .now_playing()
-        .and_then(|now| preferred_backdrop_art(now.art_small, now.art_url));
+    let now = app.now_playing();
+    let (sounding, playing) = now.as_ref().map_or((false, false), |now| {
+        ((now.playing || now.loading) && now.local, now.playing)
+    });
+    let art = now.and_then(|now| preferred_backdrop_art(now.art_small, now.art_url));
     let painter = ui.painter().with_clip_rect(rect);
-    let time = ui.input(|input| input.time) as f32;
+    let clock = ui.input(|input| input.time);
+    let time = clock as f32;
+    app.lyrics_fx
+        .update(&app.winamp.tap, sounding, playing, clock);
+    app.lyrics_fx.colors = lyrics_fx::lights(app.tint_for(art.as_deref()));
+    let (low, high) = app.lyrics_fx.colors;
     if let Some(texture) = app
         .lyrics_backdrop
         .texture(ui.ctx(), app.backend.art(), art.as_deref())
     {
-        dynamic_backdrop(&painter, rect, texture, time);
-        // The layers turn slowly; a few frames a second keep them smooth.
+        dynamic_backdrop(&painter, rect, texture, &app.lyrics_fx, time);
+    }
+    let fx = &app.lyrics_fx;
+    if playing || fx.moving() {
+        // Everything moves with the music: every frame counts.
+        ui.ctx().request_repaint();
+    } else {
+        // Paused, the layers still turn slowly; a few frames a second
+        // keep them smooth.
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(33));
     }
-    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(80));
+    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(100));
+    fx.wave(&painter, rect, low, high);
+    fx.embers(&painter, rect, low, time);
+    // A breath of the cover's colour over everything on the beat.
+    painter.rect_filled(rect, 0.0, light(low, 0.04 * fx.beat));
+    lyrics_fx::vignette(&painter, rect, 0.5);
     widgets::paint_vertical_gradient(
         ui,
         rect,
@@ -1544,7 +1769,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
     let following = app.lyrics_following && !manual_scroll;
     let follow = following && app.lyrics_line_shown != Some(active);
     let animation = egui::style::ScrollAnimation::duration(0.45);
-    let size = (ui.available_width() * 0.05).clamp(30.0, 46.0);
+    let size = (ui.available_width() * 0.06).clamp(30.0, 50.0);
     let mut animating = false;
     ui.spacing_mut().scroll.fade.strength = 0.0;
     egui::ScrollArea::vertical()
@@ -1587,6 +1812,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                     animation: Some(animation),
                     viewport: Some(viewport),
                     autoscroll_rows: false,
+                    glow: Some(app.lyrics_fx.glow(app.lyrics_fx.colors.0)),
                 },
             );
             animating = drawn.animating;

@@ -411,6 +411,8 @@ pub struct App {
     lyrics_fullscreen_restoring: Option<bool>,
     lyrics_restore_maximized: bool,
     pub lyrics_backdrop: crate::images::LyricsBackdrop,
+    /// The song's pulse, for the light that moves in full screen lyrics.
+    pub lyrics_fx: crate::ui::lyrics_fx::Fx,
     pub softened_covers: crate::images::SoftenedCovers,
     /// The track the lyrics below are for.
     pub lyrics_uri: Option<String>,
@@ -862,6 +864,7 @@ impl App {
             lyrics_fullscreen_restoring: None,
             lyrics_restore_maximized: false,
             lyrics_backdrop: Default::default(),
+            lyrics_fx: Default::default(),
             softened_covers: Default::default(),
             lyrics_uri: None,
             lyrics: Loadable::NotLoaded,

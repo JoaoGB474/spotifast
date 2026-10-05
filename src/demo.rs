@@ -6201,9 +6201,12 @@ mod tests {
             }
         }
         app.backend.shutdown();
-        assert_eq!(
-            sizes[0], sizes[1],
-            "highlighting must not rewrap or resize a line"
+        // The line grows as it is sung, so its drawn size changes, but
+        // never its shape: the same words on the same rows.
+        let shape = |size: egui::Vec2| size.x / size.y;
+        assert!(
+            (shape(sizes[0]) - shape(sizes[1])).abs() < 1e-3,
+            "highlighting must not rewrap a line: {sizes:?}"
         );
     }
 
