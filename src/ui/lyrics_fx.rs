@@ -331,6 +331,169 @@ pub fn paint_blob(painter: &egui::Painter, center: Pos2, radii: Vec2, color: Col
     painter.add(mesh);
 }
 
+/// How long a line's bloom is kept after it was last drawn, in seconds.
+const BLOOM_KEPT: f64 = 8.0;
+
+/// The blooms of the lines sung lately, by what they say and how large.
+#[derive(Clone, Default)]
+struct Blooms {
+    held: Vec<(u64, egui::TextureHandle, f64)>,
+}
+
+/// The letters of `pieces` blurred into a texture, to lay behind them as
+/// light. Each piece is a galley and where it sits in a block `extent`
+/// large; the texture covers that block and `pad` more on every side, so
+/// the blur has room to spread. `key` names the block: its bloom is made
+/// once and kept while the line is on screen.
+pub fn text_bloom(
+    ctx: &egui::Context,
+    key: u64,
+    extent: Vec2,
+    pad: f32,
+    blur: f32,
+    pieces: &[(Vec2, std::sync::Arc<egui::Galley>)],
+) -> Option<egui::TextureHandle> {
+    let now = ctx.input(|input| input.time);
+    let id = egui::Id::new("lyrics-bloom");
+    let found = ctx.data_mut(|data| {
+        let blooms = data.get_temp_mut_or_default::<Blooms>(id);
+        blooms.held.retain(|(_, _, used)| now - used < BLOOM_KEPT);
+        blooms
+            .held
+            .iter_mut()
+            .find(|(held, _, _)| *held == key)
+            .map(|(_, texture, used)| {
+                *used = now;
+                texture.clone()
+            })
+    });
+    if found.is_some() {
+        return found;
+    }
+    // Half the screen's resolution is plenty for something this soft.
+    let scale = ctx.pixels_per_point() * 0.5;
+    let atlas = ctx.fonts(|fonts| fonts.image());
+    let image = bloom_image(&atlas, extent, pad, blur, scale, pieces)?;
+    let texture = ctx.load_texture("lyrics-bloom", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<Blooms>(id)
+            .held
+            .push((key, texture.clone(), now));
+    });
+    Some(texture)
+}
+
+/// Draws the letters of `pieces` from the font `atlas` and blurs them: a
+/// tight blur for a bright edge round each letter and a wide one for the
+/// light that spreads from it.
+fn bloom_image(
+    atlas: &egui::ColorImage,
+    extent: Vec2,
+    pad: f32,
+    blur: f32,
+    scale: f32,
+    pieces: &[(Vec2, std::sync::Arc<egui::Galley>)],
+) -> Option<egui::ColorImage> {
+    let width = ((extent.x + 2.0 * pad) * scale).ceil() as usize;
+    let height = ((extent.y + 2.0 * pad) * scale).ceil() as usize;
+    if width == 0 || height == 0 || width > 4_096 || height > 4_096 {
+        return None;
+    }
+    let mut cover = vec![0.0f32; width * height];
+    let [atlas_width, atlas_height] = atlas.size;
+    for (offset, galley) in pieces {
+        for placed in &galley.rows {
+            let visuals = &placed.row.visuals;
+            let Some(vertices) = visuals
+                .mesh
+                .vertices
+                .get(visuals.glyph_vertex_range.clone())
+            else {
+                continue;
+            };
+            let origin = vec2(pad, pad) + *offset + placed.pos.to_vec2();
+            // Four corners to a letter, each with its place in the atlas.
+            for corners in vertices.as_chunks::<4>().0 {
+                let mut at = Rect::NOTHING;
+                let mut from = Rect::NOTHING;
+                for corner in corners {
+                    at.extend_with(corner.pos);
+                    from.extend_with(corner.uv);
+                }
+                let at = Rect::from_min_max(
+                    ((at.min + origin).to_vec2() * scale).to_pos2(),
+                    ((at.max + origin).to_vec2() * scale).to_pos2(),
+                );
+                if at.width() <= 0.0 || at.height() <= 0.0 {
+                    continue;
+                }
+                let columns = (at.left().floor().max(0.0) as usize)
+                    ..(at.right().ceil().max(0.0) as usize).min(width);
+                let rows = (at.top().floor().max(0.0) as usize)
+                    ..(at.bottom().ceil().max(0.0) as usize).min(height);
+                for y in rows {
+                    let v = from.top() + (y as f32 + 0.5 - at.top()) / at.height() * from.height();
+                    if v < from.top() || v >= from.bottom() || v as usize >= atlas_height {
+                        continue;
+                    }
+                    for x in columns.clone() {
+                        let u =
+                            from.left() + (x as f32 + 0.5 - at.left()) / at.width() * from.width();
+                        if u < from.left() || u >= from.right() || u as usize >= atlas_width {
+                            continue;
+                        }
+                        let ink = atlas.pixels[v as usize * atlas_width + u as usize].a();
+                        let slot = &mut cover[y * width + x];
+                        *slot = slot.max(f32::from(ink) / 255.0);
+                    }
+                }
+            }
+        }
+    }
+    let reach = (blur * scale).round().max(1.0) as usize;
+    let tight = blurred(&cover, width, height, (reach / 4).max(1));
+    let wide = blurred(&cover, width, height, reach);
+    let pixels = tight
+        .iter()
+        .zip(&wide)
+        .map(|(tight, wide)| {
+            let light = ((0.3 * tight + 1.2 * wide).min(1.0) * 255.0) as u8;
+            Color32::from_rgba_premultiplied(light, light, light, light)
+        })
+        .collect();
+    Some(egui::ColorImage::new([width, height], pixels))
+}
+
+/// `values` blurred by three box blurs of `radius` each way, which comes
+/// close to a Gaussian.
+fn blurred(values: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
+    let mut from = values.to_vec();
+    let mut to = vec![0.0; values.len()];
+    let span = (2 * radius + 1) as f32;
+    for _ in 0..3 {
+        // Along the rows, then down the columns.
+        for (length, step, lines) in [(width, 1, height), (height, width, width)] {
+            for line in 0..lines {
+                let start = if step == 1 { line * width } else { line };
+                let at = |index: isize| {
+                    if index < 0 || index >= length as isize {
+                        0.0
+                    } else {
+                        from[start + index as usize * step]
+                    }
+                };
+                let mut sum: f32 = (-(radius as isize)..=radius as isize).map(at).sum();
+                for index in 0..length as isize {
+                    to[start + index as usize * step] = sum / span;
+                    sum += at(index + radius as isize + 1) - at(index - radius as isize);
+                }
+            }
+            std::mem::swap(&mut from, &mut to);
+        }
+    }
+    from
+}
+
 /// Darkness gathering towards the corners of `rect`, like a lens.
 pub fn vignette(painter: &egui::Painter, rect: Rect, strength: f32) {
     const SEGMENTS: u32 = 48;
@@ -424,6 +587,24 @@ mod tests {
         }
         assert!(fx.level > 0.05 && fx.level < 0.5, "{}", fx.level);
         assert_eq!(fx.beat, 0.0);
+    }
+
+    /// A blur spreads a point of light around it without adding any.
+    #[test]
+    fn a_blur_spreads_light_evenly_and_keeps_its_sum() {
+        let (width, height) = (41, 41);
+        let mut values = vec![0.0; width * height];
+        values[20 * width + 20] = 1.0;
+        let soft = blurred(&values, width, height, 3);
+        assert!((soft.iter().sum::<f32>() - 1.0).abs() < 1e-3);
+        assert!(
+            soft[20 * width + 20] < 0.1,
+            "the point itself is spread out"
+        );
+        let (left, right) = (soft[20 * width + 16], soft[20 * width + 24]);
+        let (above, below) = (soft[16 * width + 20], soft[24 * width + 20]);
+        assert!(left > 0.0 && (left - right).abs() < 1e-6);
+        assert!((left - above).abs() < 1e-6 && (above - below).abs() < 1e-6);
     }
 
     #[test]

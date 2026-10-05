@@ -286,18 +286,13 @@ fn word_row(
         ),
         None => TSTransform::IDENTITY,
     };
-    for ((word, galley), place) in words.iter().zip(&galleys).zip(&places) {
+    // How far through each word the song is, how much the word swells
+    // (in full screen, while it is sung, and settling once the next word
+    // takes over), and how long a note it is.
+    let timing = |word: &TimedWord<'_>| {
         let length = word.end.saturating_sub(word.start).max(1) as f32;
         let sung = (position_ms.saturating_sub(word.start) as f32 / length).clamp(0.0, 1.0);
         let sung = if look.sung >= 1.0 { 1.0 } else { sung };
-        // A word rises as it is sung and stays up until the line lets go.
-        let eased = sung * sung * (3.0 - 2.0 * sung);
-        let lift = lift_by * eased * look.lit;
-        let pos = rect.min + *place - vec2(0.0, lift);
-        let ink = layout_width(word.text, galley);
-        let word_rect = Rect::from_min_size(pos, vec2(ink, galley.size().y));
-        // In full screen the word also swells while it is sung, more on a
-        // long note, and settles once the next word takes over.
         let held = ((length - LONG_NOTE_MS) / 1_500.0).clamp(0.0, 1.0);
         let pop = if look.glow.is_some() && position_ms >= word.start && look.sung < 1.0 {
             let since = position_ms.saturating_sub(word.start) as f32;
@@ -309,6 +304,131 @@ fn word_row(
         } else {
             0.0
         };
+        (sung, pop, held)
+    };
+    // In full screen the sung words bloom: each row's own letters, blurred,
+    // laid behind it as light in the cover's colour. The light follows the
+    // sweep and is strongest on the word being sung.
+    if let Some(pulse) = look.glow
+        && look.lit > 0.01
+        && light_text
+    {
+        use std::hash::{Hash, Hasher};
+        let pad = row_height * 0.8;
+        let feather = row_height * 0.6;
+        let states: Vec<_> = words.iter().map(&timing).collect();
+        let strength =
+            |index: usize| look.lit * (0.5 + 0.5 * states[index].1) * (0.85 + 0.3 * pulse.bass);
+        let color = lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.3);
+        let mut start = 0;
+        while start < words.len() {
+            // The words that share this row.
+            let row_y = places[start].y;
+            let end = (start..words.len())
+                .find(|index| places[*index].y != row_y)
+                .unwrap_or(words.len());
+            let row = start..end;
+            start = end;
+            if states[row.start].0 <= 0.0 {
+                continue;
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for word in &words[row.clone()] {
+                word.text.hash(&mut hasher);
+            }
+            (font.size.to_bits(), width.to_bits(), row.start).hash(&mut hasher);
+            let pieces: Vec<_> = row
+                .clone()
+                .map(|index| (vec2(places[index].x, 0.0), galleys[index].clone()))
+                .collect();
+            let Some(texture) = lyrics_fx::text_bloom(
+                ui.ctx(),
+                hasher.finish(),
+                vec2(width, row_height),
+                pad,
+                row_height * 0.2,
+                &pieces,
+            ) else {
+                continue;
+            };
+            let top = rect.top() + row_y;
+            let field = Rect::from_min_size(
+                pos2(rect.left() - pad, top - pad),
+                vec2(width + 2.0 * pad, row_height + 2.0 * pad),
+            );
+            let mut mesh = egui::Mesh::with_texture(texture.id());
+            for index in row.clone() {
+                let sung = states[index].0;
+                if sung <= 0.0 {
+                    continue;
+                }
+                // Each word lights its own stretch of the row, out to the
+                // next word, so the stretches meet without overlapping.
+                let first = index == row.start;
+                let last = index + 1 == row.end;
+                let left = rect.left() + places[index].x;
+                let x0 = if first { left - pad } else { left };
+                let x1 = if last {
+                    left + galleys[index].size().x + pad
+                } else {
+                    rect.left() + places[index + 1].x
+                };
+                let front =
+                    left + sung * (layout_width(words[index].text, &galleys[index]) + feather);
+                let here = strength(index);
+                let before = if first {
+                    here
+                } else {
+                    (here + strength(index - 1)) / 2.0
+                };
+                let after = if last {
+                    here
+                } else {
+                    (here + strength(index + 1)) / 2.0
+                };
+                const SLICES: u32 = 8;
+                for slice in 0..=SLICES {
+                    let t = slice as f32 / SLICES as f32;
+                    let x = x0 + (x1 - x0) * t;
+                    let level = if t < 0.5 {
+                        before + (here - before) * t * 2.0
+                    } else {
+                        here + (after - here) * (t - 0.5) * 2.0
+                    };
+                    let reached = if sung >= 1.0 {
+                        1.0
+                    } else {
+                        ((front - x) / feather).clamp(0.0, 1.0)
+                    };
+                    let color = light(color, level * reached);
+                    let at = mesh.vertices.len() as u32;
+                    for y in [field.top(), field.bottom()] {
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: line_zoom * pos2(x, y),
+                            uv: pos2(
+                                (x - field.left()) / field.width(),
+                                (y - field.top()) / field.height(),
+                            ),
+                            color,
+                        });
+                    }
+                    if slice > 0 {
+                        mesh.add_triangle(at - 2, at - 1, at);
+                        mesh.add_triangle(at - 1, at, at + 1);
+                    }
+                }
+            }
+            painter.add(mesh);
+        }
+    }
+    for ((word, galley), place) in words.iter().zip(&galleys).zip(&places) {
+        let (sung, pop, held) = timing(word);
+        // A word rises as it is sung and stays up until the line lets go.
+        let eased = sung * sung * (3.0 - 2.0 * sung);
+        let lift = lift_by * eased * look.lit;
+        let pos = rect.min + *place - vec2(0.0, lift);
+        let ink = layout_width(word.text, galley);
+        let word_rect = Rect::from_min_size(pos, vec2(ink, galley.size().y));
         let zoom = line_zoom
             * zoom_about(
                 pos2(word_rect.center().x, word_rect.bottom()),
@@ -321,59 +441,31 @@ fn word_row(
         let bright = look.color.gamma_multiply(look.lit);
         let feather = (row_height * 0.6).min(ink.max(1.0));
         let front = sung * (ink + feather);
-        // The panel's glow follows each word and lets go of it. In full
-        // screen every sung word of the line keeps a soft bloom in the
-        // cover's colour, strongest on the word being sung.
-        let glow_alpha = match look.glow {
-            _ if !light_text => 0.0,
-            Some(_) => smooth(sung * 4.0) * (0.6 + 0.4 * pop) * look.lit,
-            None => glow(sung) * look.lit,
+        // The panel's glow follows each word and lets go of it; full
+        // screen has its bloom instead.
+        let glow_alpha = if light_text && look.glow.is_none() {
+            glow(sung) * look.lit
+        } else {
+            0.0
         };
         let solid = Rect::from_x_y_ranges(
             word_rect.left()..=word_rect.left() + (front - feather).clamp(0.0, ink),
-            word_rect.top() - row_height * 0.25..=word_rect.bottom() + row_height * 0.25,
+            word_rect.top() - row_height * 0.2..=word_rect.bottom() + row_height * 0.2,
         );
         if solid.width() > 0.0 {
             let clipped = painter.with_clip_rect((zoom * solid).intersect(painter.clip_rect()));
             if glow_alpha > 0.01 {
-                // Copies of the word in rings around it: one ring in the
-                // panel, and three of light, each wider and fainter, in
-                // full screen. No ring reaches further than a letter's
-                // stroke is thick, or the copies would show as ghosts.
-                let rings: &[(f32, f32)] = match look.glow {
-                    Some(_) => &[(0.035, 0.04), (0.07, 0.028), (0.105, 0.016)],
-                    None => &[(0.1, 0.09)],
-                };
-                let copies = if look.glow.is_some() { 12 } else { 8 };
-                // The glow spills past the word's own edge on the left,
-                // where the sweep began, rather than being cut there.
-                let spill = match look.glow {
-                    Some(_) => row_height * 0.12,
-                    None => 0.0,
-                };
-                let around = painter.with_clip_rect(
-                    (zoom * Rect::from_min_max(pos2(solid.left() - spill, solid.top()), solid.max))
-                        .intersect(painter.clip_rect()),
-                );
-                for (ring, &(reach, strength)) in rings.iter().enumerate() {
-                    let halo = match look.glow {
-                        Some(pulse) => light(
-                            lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.6),
-                            strength * glow_alpha,
-                        ),
-                        None => look.color.gamma_multiply(strength * glow_alpha),
-                    };
-                    for step in 0..copies {
-                        let angle = (step as f32 + ring as f32 * 0.5) * std::f32::consts::TAU
-                            / copies as f32;
-                        paint_galley(
-                            &around,
-                            pos + vec2(angle.cos(), angle.sin()) * row_height * reach,
-                            galley,
-                            halo,
-                            zoom,
-                        );
-                    }
+                let halo = look.color.gamma_multiply(0.09 * glow_alpha);
+                let radius = row_height * 0.1;
+                for step in 0..8 {
+                    let angle = step as f32 * std::f32::consts::TAU / 8.0;
+                    paint_galley(
+                        &clipped,
+                        pos + vec2(angle.cos(), angle.sin()) * radius,
+                        galley,
+                        halo,
+                        zoom,
+                    );
                 }
             }
             paint_galley(&clipped, pos, galley, bright, zoom);
