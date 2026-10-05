@@ -286,23 +286,6 @@ fn word_row(
         ),
         None => TSTransform::IDENTITY,
     };
-    if let Some(pulse) = look.glow
-        && look.lit > 0.01
-    {
-        // A wide, faint light behind the whole line.
-        let extent = words
-            .iter()
-            .zip(&galleys)
-            .zip(&places)
-            .map(|((word, galley), place)| place.x + layout_width(word.text, galley))
-            .fold(0.0, f32::max);
-        lyrics_fx::paint_blob(
-            &painter,
-            line_zoom * pos2(rect.left() + extent / 2.0, rect.center().y),
-            vec2(extent * 0.62 + row_height, height * 0.75 + row_height * 0.4),
-            light(pulse.accent, 0.05 * look.lit * (0.6 + 0.6 * pulse.bass)),
-        );
-    }
     for ((word, galley), place) in words.iter().zip(&galleys).zip(&places) {
         let length = word.end.saturating_sub(word.start).max(1) as f32;
         let sung = (position_ms.saturating_sub(word.start) as f32 / length).clamp(0.0, 1.0);
@@ -329,19 +312,8 @@ fn word_row(
         let zoom = line_zoom
             * zoom_about(
                 pos2(word_rect.center().x, word_rect.bottom()),
-                1.0 + (0.045 + 0.075 * held) * pop,
+                1.0 + (0.025 + 0.045 * held) * pop,
             );
-        if let Some(pulse) = look.glow
-            && pop > 0.01
-        {
-            let strength = (0.15 + 0.14 * pulse.bass + 0.1 * pulse.beat + 0.12 * held) * pop;
-            lyrics_fx::paint_blob(
-                &painter,
-                zoom * word_rect.center(),
-                vec2(ink * 0.6 + row_height * 0.8, row_height * 0.95) * (1.0 + 0.25 * pulse.bass),
-                light(lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.2), strength),
-            );
-        }
         paint_galley(&painter, pos, galley, look.color.gamma_multiply(base), zoom);
         if look.lit <= 0.001 || sung <= 0.0 {
             continue;
@@ -349,29 +321,46 @@ fn word_row(
         let bright = look.color.gamma_multiply(look.lit);
         let feather = (row_height * 0.6).min(ink.max(1.0));
         let front = sung * (ink + feather);
-        let glow_alpha = if light_text {
-            glow(sung) * look.lit
-        } else {
-            0.0
+        // The panel's glow follows each word and lets go of it. In full
+        // screen every sung word of the line keeps a soft bloom in the
+        // cover's colour, strongest on the word being sung.
+        let glow_alpha = match look.glow {
+            _ if !light_text => 0.0,
+            Some(_) => smooth(sung * 4.0) * (0.4 + 0.6 * pop) * look.lit,
+            None => glow(sung) * look.lit,
         };
         let solid = Rect::from_x_y_ranges(
             word_rect.left()..=word_rect.left() + (front - feather).clamp(0.0, ink),
-            word_rect.top() - row_height * 0.2..=word_rect.bottom() + row_height * 0.2,
+            word_rect.top() - row_height * 0.25..=word_rect.bottom() + row_height * 0.25,
         );
         if solid.width() > 0.0 {
             let clipped = painter.with_clip_rect((zoom * solid).intersect(painter.clip_rect()));
             if glow_alpha > 0.01 {
-                let halo = look.color.gamma_multiply(0.09 * glow_alpha);
-                let radius = row_height * 0.1;
-                for step in 0..8 {
-                    let angle = step as f32 * std::f32::consts::TAU / 8.0;
-                    paint_galley(
-                        &clipped,
-                        pos + vec2(angle.cos(), angle.sin()) * radius,
-                        galley,
-                        halo,
-                        zoom,
-                    );
+                // Copies of the word in rings around it: one ring in the
+                // panel, and three of light, each wider and fainter, in
+                // full screen.
+                let rings: &[(f32, f32)] = match look.glow {
+                    Some(_) => &[(0.06, 0.1), (0.13, 0.055), (0.21, 0.025)],
+                    None => &[(0.1, 0.09)],
+                };
+                for (ring, &(reach, strength)) in rings.iter().enumerate() {
+                    let halo = match look.glow {
+                        Some(pulse) => light(
+                            lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.45),
+                            strength * glow_alpha,
+                        ),
+                        None => look.color.gamma_multiply(strength * glow_alpha),
+                    };
+                    for step in 0..8 {
+                        let angle = (step as f32 + ring as f32 * 0.5) * std::f32::consts::TAU / 8.0;
+                        paint_galley(
+                            &clipped,
+                            pos + vec2(angle.cos(), angle.sin()) * row_height * reach,
+                            galley,
+                            halo,
+                            zoom,
+                        );
+                    }
                 }
             }
             paint_galley(&clipped, pos, galley, bright, zoom);
@@ -394,32 +383,6 @@ fn word_row(
                 galley,
                 bright.gamma_multiply(alpha),
                 zoom,
-            );
-        }
-        // A glint of light rides the front of the sweep across the word.
-        if let Some(pulse) = look.glow
-            && sung < 1.0
-        {
-            let strength = (sung * 8.0).min(1.0) * ((1.0 - sung) * 8.0).min(1.0) * look.lit;
-            let at = zoom
-                * pos2(
-                    word_rect.left() + (front - feather * 0.5).clamp(0.0, ink),
-                    word_rect.center().y,
-                );
-            lyrics_fx::paint_blob(
-                &painter,
-                at,
-                vec2(row_height * 0.5, row_height * 0.75),
-                light(Color32::WHITE, 0.16 * strength),
-            );
-            lyrics_fx::paint_blob(
-                &painter,
-                at,
-                vec2(row_height * 0.1, row_height * 0.95),
-                light(
-                    lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.55),
-                    0.4 * strength,
-                ),
             );
         }
     }
@@ -627,8 +590,8 @@ fn interlude_row(
 }
 
 /// The blurred cover, drawn as a few slowly turning layers so the colours
-/// drift behind the words. They swell with the bass and turn faster while
-/// the song is loud, and brighter copies sweep across on top as light.
+/// drift behind the words. They turn faster while the song is loud, and
+/// brighter copies sweep across on top as light.
 fn dynamic_backdrop(
     painter: &egui::Painter,
     rect: Rect,
@@ -640,27 +603,27 @@ fn dynamic_backdrop(
         texture.id(),
         rect,
         cover_uv(rect.size(), texture.size_vec2()),
-        Color32::from_gray(150),
+        Color32::from_gray(190),
     );
     let reach = rect.width().max(rect.height());
     // Big soft discs of the cover drifting and turning at different
     // speeds, the brightest in the middle, so its colours flow slowly.
     let layers = [
-        (vec2(0.5, 0.5), 0.95, -0.035, 0.0, 165),
-        (vec2(0.15, 0.2), 0.7, 0.06, 1.7, 200),
-        (vec2(0.88, 0.82), 0.68, -0.075, 3.4, 190),
-        (vec2(0.78, 0.18), 0.5, 0.09, 5.1, 175),
-        (vec2(0.35, 0.62), 0.55, -0.05, 2.3, 210),
+        (vec2(0.5, 0.5), 0.95, -0.035, 0.0, 190),
+        (vec2(0.15, 0.2), 0.7, 0.06, 1.7, 225),
+        (vec2(0.88, 0.82), 0.68, -0.075, 3.4, 215),
+        (vec2(0.78, 0.18), 0.5, 0.09, 5.1, 205),
+        (vec2(0.35, 0.62), 0.55, -0.05, 2.3, 235),
     ];
     for (at, radius, speed, phase, gray) in layers {
         let drift = vec2(
             (time * 0.045 + phase).sin() * 0.09,
             (time * 0.035 + phase * 1.3).cos() * 0.07,
         );
-        let breathe = 1.0 + 0.06 * (time * 0.11 + phase).sin() + 0.07 * fx.bass;
+        let breathe = 1.0 + 0.06 * (time * 0.11 + phase).sin() + 0.035 * fx.bass;
         let center = rect.min + (at + drift) * rect.size();
         let angle = (time + fx.flow * 1.5) * speed + phase;
-        let gray = (gray as f32 + 38.0 * fx.beat).min(255.0) as u8;
+        let gray = (gray as f32 + 12.0 * fx.beat).min(255.0) as u8;
         paint_disc(
             painter,
             texture.id(),
@@ -670,14 +633,13 @@ fn dynamic_backdrop(
             Color32::from_gray(gray),
         );
     }
-    // The same colours again as light, circling faster and flaring on the
-    // beat.
+    // The same colours again as light, circling faster while it is loud.
     let lights = [
         (0.0, 0.33, 0.21, 0.4),
         (2.1, -0.27, 0.3, 0.34),
         (4.2, 0.19, -0.26, 0.3),
     ];
-    let strength = 0.05 + 0.11 * fx.level + 0.14 * fx.beat;
+    let strength = 0.08 + 0.12 * fx.level + 0.03 * fx.beat;
     for (phase, turn, orbit, radius) in lights {
         let around = fx.flow * orbit + phase;
         let center = rect.center()
@@ -689,7 +651,7 @@ fn dynamic_backdrop(
             painter,
             texture.id(),
             center,
-            reach * radius * (1.0 + 0.18 * fx.bass),
+            reach * radius * (1.0 + 0.08 * fx.bass),
             fx.flow * turn + phase,
             light(Color32::WHITE, strength),
         );
@@ -1290,18 +1252,14 @@ fn big_cover(app: &mut App, ui: &mut egui::Ui, column: Rect, align: Align) {
     let side = column.width();
     let cover = Rect::from_min_size(column.min, vec2(side, side));
     let radius = 14.0;
-    // The cover's own colour glows behind it, swelling with the bass, and
-    // each beat nudges the cover and sends a ring of light out from it.
-    let fx = &app.lyrics_fx;
-    let (low, _) = fx.colors;
+    // The cover's own colour glows softly behind it.
+    let (low, _) = app.lyrics_fx.colors;
     lyrics_fx::paint_blob(
         ui.painter(),
         cover.center(),
-        egui::Vec2::splat(side * (0.86 + 0.14 * fx.bass)),
-        light(low, 0.1 + 0.13 * fx.bass + 0.1 * fx.beat),
+        egui::Vec2::splat(side * 0.9),
+        light(low, 0.1),
     );
-    fx.rings(ui.painter(), cover.center(), side * 0.5, side * 1.3, low);
-    let cover = cover.expand(side * 0.01 * fx.beat);
     ui.painter().add(
         egui::epaint::Shadow {
             offset: [0, 24],
@@ -1597,11 +1555,9 @@ fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(33));
     }
-    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(100));
+    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(72));
     fx.wave(&painter, rect, low, high);
     fx.embers(&painter, rect, low, time);
-    // A breath of the cover's colour over everything on the beat.
-    painter.rect_filled(rect, 0.0, light(low, 0.04 * fx.beat));
     lyrics_fx::vignette(&painter, rect, 0.5);
     widgets::paint_vertical_gradient(
         ui,

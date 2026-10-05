@@ -432,7 +432,7 @@ pub fn accent_color(bytes: &[u8]) -> Option<[u8; 3]> {
 }
 
 /// Blur applied to the full-window lyrics backdrop.
-const LYRICS_BLUR: f32 = 9.0;
+const LYRICS_BLUR: f32 = 7.0;
 
 /// Blur applied to a library thumbnail standing in for a cover.
 ///
@@ -664,7 +664,7 @@ fn blurred_background(bytes: &[u8], sigma: f32) -> Option<egui::ColorImage> {
 /// The backdrop's colours a little richer than the cover's, so the
 /// darkened layers behind the lyrics still glow.
 fn vivid(mut image: egui::ColorImage) -> egui::ColorImage {
-    const SATURATION: f32 = 1.35;
+    const SATURATION: f32 = 1.75;
     for pixel in &mut image.pixels {
         let [r, g, b, a] = pixel.to_srgba_unmultiplied().map(f32::from);
         let gray = 0.299 * r + 0.587 * g + 0.114 * b;

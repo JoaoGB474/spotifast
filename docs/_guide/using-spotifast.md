@@ -490,12 +490,12 @@ hand pauses following; choose **Follow** to resume. Since 0.11.0, a wide
 window shows the song's cover beside the lyrics, the two centred together,
 and a song without words, such as an instrumental, shows just its cover in
 the middle of the screen.
-The backdrop moves with the music: the cover's colours swell with the bass,
-embers drift up the screen, a wave of light follows the spectrum along the
-bottom edge, and each beat sends a ring of light out from the cover. The line
-being sung grows, and each word swells and glows as it is sung. A song playing
-on another device has no sound to follow here, so the light breathes slowly
-instead.
+The backdrop is the cover's own colours, vivid and slowly turning, and it
+moves with the music: the colours turn faster while the song is loud, embers
+drift up the screen, and a low wave of light follows the spectrum along the
+bottom edge. The line being sung grows, and its words glow in the cover's
+colour as they are sung. A song playing on another device has no sound to
+follow here, so the light breathes slowly instead.
 Since 0.10.0, quitting while lyrics are full screen no longer leaves
 the next launch stuck in full screen: the window returns to its previous size.
 

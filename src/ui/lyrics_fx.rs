@@ -1,5 +1,5 @@
 //! The light that moves with the music in full screen lyrics: how loud the
-//! song is and where its beats fall, and the glows, embers and waves drawn
+//! song is and where its beats fall, and the glow, embers and wave drawn
 //! from them behind and around the words.
 
 use egui::{Color32, Mesh, Pos2, Rect, Vec2, pos2, vec2};
@@ -15,12 +15,8 @@ const BASS_PASS: f32 = 0.021;
 const BEAT_OVER: f32 = 1.38;
 /// The shortest time between two beats, so one kick is one beat.
 const BEAT_GAP: f32 = 0.16;
-/// Rings of light kept at once, the oldest dropped first.
-const RINGS: usize = 4;
-/// How long a ring takes to spread out and fade.
-const RING_SECONDS: f32 = 1.6;
 /// Embers drifting up the screen.
-const EMBERS: usize = 90;
+const EMBERS: usize = 44;
 /// Segments round a soft blob of light.
 const BLOB_SEGMENTS: u32 = 20;
 
@@ -44,8 +40,6 @@ pub struct Fx {
     pub flow: f32,
     /// The cover's colour as light, and its companion; see [`lights`].
     pub colors: (Color32, Color32),
-    /// Seconds since each ring of light left the cover.
-    rings: Vec<f32>,
     /// Whether any sound reached the tap lately; without it the pulse
     /// breathes on its own.
     heard: f32,
@@ -64,7 +58,6 @@ impl Default for Fx {
             beat: 0.0,
             flow: 0.0,
             colors: lights(None),
-            rings: Vec::new(),
             heard: 0.0,
         }
     }
@@ -120,10 +113,6 @@ impl Fx {
             if bass > self.average * BEAT_OVER && bass > 0.18 && self.since_beat > BEAT_GAP {
                 self.beat = 1.0;
                 self.since_beat = 0.0;
-                if self.rings.len() == RINGS {
-                    self.rings.remove(0);
-                }
-                self.rings.push(0.0);
             }
             self.average = approach(self.average, bass, dt * 2.2);
             self.bass = follow(self.bass, bass, dt, 40.0, 4.5);
@@ -141,10 +130,6 @@ impl Fx {
             self.level = follow(self.level, breath, dt, 3.0, 3.0);
         }
         self.flow += dt * (0.35 + 1.4 * self.level + 1.2 * self.beat);
-        for age in &mut self.rings {
-            *age += dt;
-        }
-        self.rings.retain(|age| *age < RING_SECONDS);
     }
 
     pub fn glow(&self, accent: Color32) -> Glow {
@@ -157,31 +142,7 @@ impl Fx {
 
     /// Whether anything is still moving and wants another frame.
     pub fn moving(&self) -> bool {
-        self.level > 0.005 || self.beat > 0.005 || !self.rings.is_empty()
-    }
-
-    /// Rings of light spreading from `center` since the last few beats.
-    pub fn rings(
-        &self,
-        painter: &egui::Painter,
-        center: Pos2,
-        start: f32,
-        reach: f32,
-        color: Color32,
-    ) {
-        for age in &self.rings {
-            let through = age / RING_SECONDS;
-            let eased = 1.0 - (1.0 - through).powi(3);
-            let radius = start + (reach - start) * eased;
-            let strength = (1.0 - through).powi(2) * 0.2;
-            ring(
-                painter,
-                center,
-                radius,
-                (reach * 0.06).max(12.0) * (0.5 + through),
-                light(color, strength),
-            );
-        }
+        self.level > 0.005 || self.beat > 0.005
     }
 
     /// Embers drifting up `rect`, faster and brighter while the song is
@@ -200,7 +161,7 @@ impl Fx {
             let twinkle = 0.55
                 + 0.45 * (time * (0.7 + 2.2 * seed(5)) + seed(6) * std::f32::consts::TAU).sin();
             let strength =
-                life * twinkle * (0.1 + 0.3 * self.level + 0.25 * self.beat) * (0.4 + depth);
+                life * twinkle * (0.07 + 0.2 * self.level + 0.06 * self.beat) * (0.4 + depth);
             if strength < 0.004 {
                 continue;
             }
@@ -208,7 +169,7 @@ impl Fx {
                 rect.left() + rect.width() * x.rem_euclid(1.0),
                 rect.bottom() - rect.height() * rise,
             );
-            let radius = (1.5 + 7.0 * depth * depth) * (1.0 + 0.5 * self.beat);
+            let radius = 1.5 + 6.0 * depth * depth;
             // Most embers take the cover's colour; a few stay white.
             let color = if seed(7) > 0.7 {
                 Color32::WHITE
@@ -227,7 +188,7 @@ impl Fx {
 
     /// The spectrum as a soft wave of light rising from the bottom edge.
     pub fn wave(&self, painter: &egui::Painter, rect: Rect, low: Color32, high: Color32) {
-        let height = rect.height() * 0.2;
+        let height = rect.height() * 0.09;
         let points = 96;
         let mut mesh = Mesh::default();
         for point in 0..=points {
@@ -238,7 +199,7 @@ impl Fx {
             let x = rect.left() + rect.width() * across;
             let top = rect.bottom() - height * (0.04 + level);
             let color = mix(low, high, from_middle);
-            let strength = 0.1 + 0.34 * level;
+            let strength = 0.04 + 0.16 * level;
             let index = mesh.vertices.len() as u32;
             mesh.colored_vertex(pos2(x, rect.bottom()), light(color, strength));
             mesh.colored_vertex(pos2(x, top), Color32::TRANSPARENT);
@@ -370,32 +331,6 @@ pub fn paint_blob(painter: &egui::Painter, center: Pos2, radii: Vec2, color: Col
     painter.add(mesh);
 }
 
-/// A soft ring of `color`, `width` thick, fading to nothing on both sides.
-fn ring(painter: &egui::Painter, center: Pos2, radius: f32, width: f32, color: Color32) {
-    const SEGMENTS: u32 = 72;
-    let mut mesh = Mesh::default();
-    for segment in 0..SEGMENTS {
-        let theta = segment as f32 * std::f32::consts::TAU / SEGMENTS as f32;
-        let (sin, cos) = theta.sin_cos();
-        let out = vec2(cos, sin);
-        mesh.colored_vertex(
-            center + out * (radius - width).max(0.0),
-            Color32::TRANSPARENT,
-        );
-        mesh.colored_vertex(center + out * radius, color);
-        mesh.colored_vertex(center + out * (radius + width), Color32::TRANSPARENT);
-    }
-    for segment in 0..SEGMENTS {
-        let at = segment * 3;
-        let next = ((segment + 1) % SEGMENTS) * 3;
-        for band in 0..2 {
-            mesh.add_triangle(at + band, at + band + 1, next + band + 1);
-            mesh.add_triangle(at + band, next + band + 1, next + band);
-        }
-    }
-    painter.add(mesh);
-}
-
 /// Darkness gathering towards the corners of `rect`, like a lens.
 pub fn vignette(painter: &egui::Painter, rect: Rect, strength: f32) {
     const SEGMENTS: u32 = 48;
@@ -443,8 +378,8 @@ mod tests {
         assert_eq!(loudness(&[]), (0.0, 0.0));
     }
 
-    /// A kick after a quiet stretch is a beat, sends out a ring, and both
-    /// fade away again; silence leaves the pulse at rest.
+    /// A kick after a quiet stretch is a beat that fades away again;
+    /// silence leaves the pulse at rest.
     #[test]
     fn a_kick_is_a_beat_that_fades() {
         let tap = vis::AudioTap::new();
@@ -466,14 +401,13 @@ mod tests {
         push(&tone(60.0, 0.8, 22_050));
         fx.update(&tap, true, true, time);
         assert_eq!(fx.beat, 1.0);
-        assert_eq!(fx.rings.len(), 1);
         assert!(fx.moving());
         tap.clear();
         for _ in 0..600 {
             time += 1.0 / 60.0;
             fx.update(&tap, true, false, time);
         }
-        assert!(fx.beat < 0.01 && fx.rings.is_empty());
+        assert!(fx.beat < 0.01);
         assert!(!fx.moving(), "silence while paused comes to rest");
     }
 
