@@ -478,20 +478,31 @@ fn dynamic_backdrop(painter: &egui::Painter, rect: Rect, texture: &egui::Texture
         Color32::from_gray(150),
     );
     let reach = rect.width().max(rect.height());
+    // Big soft discs of the cover drifting and turning at different
+    // speeds, the brightest in the middle, so its colours flow slowly.
     let layers = [
-        (vec2(0.5, 0.5), 0.78, -0.045, 0.0),
-        (vec2(0.18, 0.28), 0.62, 0.07, 1.7),
-        (vec2(0.84, 0.76), 0.58, -0.09, 3.4),
+        (vec2(0.5, 0.5), 0.95, -0.035, 0.0, 165),
+        (vec2(0.15, 0.2), 0.7, 0.06, 1.7, 200),
+        (vec2(0.88, 0.82), 0.68, -0.075, 3.4, 190),
+        (vec2(0.78, 0.18), 0.5, 0.09, 5.1, 175),
+        (vec2(0.35, 0.62), 0.55, -0.05, 2.3, 210),
     ];
-    for (index, (at, radius, speed, phase)) in layers.into_iter().enumerate() {
+    for (at, radius, speed, phase, gray) in layers {
         let drift = vec2(
-            (time * 0.05 + phase).sin() * 0.06,
-            (time * 0.04 + phase * 1.3).cos() * 0.05,
+            (time * 0.045 + phase).sin() * 0.09,
+            (time * 0.035 + phase * 1.3).cos() * 0.07,
         );
+        let breathe = 1.0 + 0.06 * (time * 0.11 + phase).sin();
         let center = rect.min + (at + drift) * rect.size();
         let angle = time * speed + phase;
-        let tint = Color32::from_gray([185, 200, 175][index]);
-        paint_disc(painter, texture.id(), center, reach * radius, angle, tint);
+        paint_disc(
+            painter,
+            texture.id(),
+            center,
+            reach * radius * breathe,
+            angle,
+            Color32::from_gray(gray),
+        );
     }
 }
 
@@ -917,12 +928,34 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
     app.lyrics_line_shown = Some(active);
 }
 
+/// How much of the full screen controls show: all of them while the
+/// pointer moves, fading away once it rests so only the cover and the
+/// words remain, with the pointer hidden too.
+fn chrome_opacity(ctx: &egui::Context) -> f32 {
+    let resting = ctx.input(|input| input.pointer.time_since_last_movement()) > CHROME_REST_SECONDS
+        && !ctx.input(|input| input.pointer.any_down());
+    ctx.animate_bool_with_time(egui::Id::new("fullscreen-chrome"), !resting, 0.5)
+}
+
+/// Seconds the pointer rests before the full screen controls fade.
+const CHROME_REST_SECONDS: f32 = 2.5;
+
 pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
     egui::CentralPanel::default()
         .frame(Frame::new().fill(theme::Palette::dark().window))
         .show(ui, |ui| {
             let rect = ui.max_rect();
             background(app, ui, rect);
+            let chrome = chrome_opacity(ui.ctx());
+            if chrome < 0.01 {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            } else if chrome < 1.0 {
+                ui.ctx().request_repaint();
+            } else {
+                // Look again when the pointer has rested long enough.
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f32(CHROME_REST_SECONDS));
+            }
             let top = theme::titlebar_inset(ui.ctx()) + 24.0;
             if app.now_playing().is_some() && rect.width() >= COVER_BESIDE_MIN_WIDTH {
                 with_cover(app, ui, rect, top);
@@ -946,7 +979,7 @@ pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
 const LYRICS_BESIDE_WIDTH: f32 = 640.0;
 
 /// Room under the big cover for the title, artists and seek bar.
-const COVER_CAPTION: f32 = 140.0;
+const COVER_CAPTION: f32 = 196.0;
 
 /// The narrowest window that shows the cover beside the lyrics; narrower
 /// ones keep a single column with a small cover in the heading.
@@ -1104,7 +1137,74 @@ fn big_cover(app: &mut App, ui: &mut egui::Ui, column: Rect, align: Align) {
         .truncate(),
     );
     text.add_space(12.0);
-    seek_bar(app, &mut text, &now, side);
+    let chrome = chrome_opacity(ui.ctx());
+    text.scope(|ui| {
+        ui.multiply_opacity(chrome);
+        seek_bar(app, ui, &now, side);
+        ui.add_space(26.0);
+        playback_buttons(app, ui, &now, side);
+    });
+}
+
+/// Previous, play or pause, and next, centred under the seek bar, since
+/// full screen has no player bar.
+fn playback_buttons(app: &mut App, ui: &mut egui::Ui, now: &crate::app::NowPlaying, width: f32) {
+    let top = ui.cursor().top();
+    let center = ui.cursor().left() + width / 2.0;
+    let row = Rect::from_center_size(pos2(center, top + 22.0), vec2(200.0, 44.0));
+    let mut row_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(row)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    row_ui.spacing_mut().item_spacing.x = 28.0;
+    let quiet = Color32::from_white_alpha(200);
+    if theme::icon_button(
+        &mut row_ui,
+        Icon::SkipBackFilled,
+        22.0,
+        quiet,
+        Color32::WHITE,
+        &gettext(app.locale, "Previous"),
+    )
+    .clicked()
+    {
+        app.actions.push(Action::Previous);
+    }
+    let (icon, label) = if now.playing {
+        (Icon::PauseFilled, gettext(app.locale, "Pause"))
+    } else {
+        (Icon::PlayFilled, gettext(app.locale, "Play"))
+    };
+    if theme::circle_button(
+        &mut row_ui,
+        icon,
+        44.0,
+        Color32::from_white_alpha(235),
+        Color32::WHITE,
+        Color32::from_gray(20),
+        &label,
+    )
+    .clicked()
+    {
+        app.actions.push(Action::TogglePlay);
+    }
+    if theme::icon_button(
+        &mut row_ui,
+        Icon::SkipForwardFilled,
+        22.0,
+        quiet,
+        Color32::WHITE,
+        &gettext(app.locale, "Next"),
+    )
+    .clicked()
+    {
+        app.actions.push(Action::Next);
+    }
+    ui.advance_cursor_after_rect(Rect::from_min_size(
+        pos2(ui.cursor().left(), top),
+        vec2(width, 44.0),
+    ));
 }
 
 /// A white seek bar with the elapsed and total time under it.
@@ -1188,9 +1288,9 @@ fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
         dynamic_backdrop(&painter, rect, texture, time);
         // The layers turn slowly; a few frames a second keep them smooth.
         ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(50));
+            .request_repaint_after(std::time::Duration::from_millis(33));
     }
-    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(105));
+    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(80));
     widgets::paint_vertical_gradient(
         ui,
         rect,
@@ -1211,13 +1311,11 @@ fn cover_uv(view: egui::Vec2, image: egui::Vec2) -> Rect {
 
 fn fullscreen_header(app: &mut App, ui: &mut egui::Ui) {
     let palette = theme::Palette::dark();
+    // No title: the cover and the words say what this is. The buttons fade
+    // with the other controls when the pointer rests.
+    ui.multiply_opacity(chrome_opacity(ui.ctx()));
     ui.horizontal(|ui| {
-        theme::text(
-            ui,
-            gettext(app.locale, "Lyrics"),
-            theme::bold(18.0),
-            palette.text,
-        );
+        ui.set_min_height(26.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if theme::icon_button(
                 ui,
@@ -1365,6 +1463,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical()
         .id_salt(("fullscreen-lyrics-scroll", &now.uri))
         .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
         .show(ui, |ui| {
             // Before the first line there is nothing to highlight, so the
             // panel sits at the top rather than wherever it was left.

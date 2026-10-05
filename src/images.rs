@@ -492,7 +492,7 @@ impl LyricsBackdrop {
                 let result = match inner.fetch(&url).await {
                     Ok(bytes) => inner
                         .runtime
-                        .spawn_blocking(move || blurred_background(&bytes, LYRICS_BLUR))
+                        .spawn_blocking(move || blurred_background(&bytes, LYRICS_BLUR).map(vivid))
                         .await
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error),
@@ -659,6 +659,19 @@ fn blurred_background(bytes: &[u8], sigma: f32) -> Option<egui::ColorImage> {
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
     Some(blurred_image(reader.decode().ok()?, sigma))
+}
+
+/// The backdrop's colours a little richer than the cover's, so the
+/// darkened layers behind the lyrics still glow.
+fn vivid(mut image: egui::ColorImage) -> egui::ColorImage {
+    const SATURATION: f32 = 1.35;
+    for pixel in &mut image.pixels {
+        let [r, g, b, a] = pixel.to_srgba_unmultiplied().map(f32::from);
+        let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+        let boost = |c: f32| (gray + (c - gray) * SATURATION).clamp(0.0, 255.0) as u8;
+        *pixel = egui::Color32::from_rgba_unmultiplied(boost(r), boost(g), boost(b), a as u8);
+    }
+    image
 }
 
 fn blurred_image(image: image::DynamicImage, sigma: f32) -> egui::ColorImage {

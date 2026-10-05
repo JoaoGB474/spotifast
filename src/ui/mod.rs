@@ -62,7 +62,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ),
         );
     }
-    player_bar::show(app, ui);
+    // Full screen lyrics are the whole window: no player bar beneath.
+    if app.lyrics_fullscreen.is_none() {
+        player_bar::show(app, ui);
+    }
     if app.lyrics_fullscreen.is_some() {
         lyrics::fullscreen(app, ui);
     } else {
