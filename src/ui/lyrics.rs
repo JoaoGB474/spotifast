@@ -115,6 +115,193 @@ fn gap_fraction(lyrics: &crate::lyrics::Lyrics, index: Option<usize>, position_m
         .clamp(0.0, 1.0)
 }
 
+/// One word of a line and when it is sung.
+struct TimedWord<'a> {
+    text: &'a str,
+    start: u32,
+    end: u32,
+}
+
+/// When each word of line `index` is sung: from the lyrics' own word
+/// stamps when they have them, otherwise spread over the line's sweep by
+/// the length of each word, so every timed line lights word by word.
+fn timed_words(lyrics: &crate::lyrics::Lyrics, index: usize) -> Vec<TimedWord<'_>> {
+    let line = &lyrics.lines[index];
+    let Some(at) = line.at_ms else {
+        return Vec::new();
+    };
+    let next = lyrics.lines[index + 1..]
+        .iter()
+        .find_map(|line| line.at_ms)
+        .unwrap_or(u32::MAX);
+    let length = |text: &str| text.chars().filter(|c| !c.is_whitespace()).count() as u32;
+    if !line.words.is_empty() {
+        let last = line.words.last().map_or(at, |word| word.at_ms);
+        let last_length = line.words.last().map_or(0, |word| length(&word.text));
+        let end = (last + 400.max(last_length * SWEEP_PER_CHAR_MS)).min(next.max(last + 1));
+        return line
+            .words
+            .iter()
+            .enumerate()
+            .map(|(i, word)| TimedWord {
+                text: &word.text,
+                start: word.at_ms,
+                end: line
+                    .words
+                    .get(i + 1)
+                    .map_or(end, |next| next.at_ms.max(word.at_ms + 1)),
+            })
+            .collect();
+    }
+    let chars = line.text.chars().count() as u32;
+    let sweep = (SWEEP_MIN_MS.max(chars * SWEEP_PER_CHAR_MS)).min(next.saturating_sub(at).max(1));
+    let pieces: Vec<&str> = line.text.split_inclusive(char::is_whitespace).collect();
+    // A small share per word on top of its letters, so short words still
+    // get a beat of their own.
+    let weight = |text: &str| length(text) + 2;
+    let total: u32 = pieces.iter().map(|piece| weight(piece)).sum::<u32>().max(1);
+    let mut before = 0;
+    pieces
+        .into_iter()
+        .map(|piece| {
+            let start = at + (u64::from(sweep) * u64::from(before) / u64::from(total)) as u32;
+            before += weight(piece);
+            let end = at + (u64::from(sweep) * u64::from(before) / u64::from(total)) as u32;
+            TimedWord {
+                text: piece,
+                start,
+                end: end.max(start + 1),
+            }
+        })
+        .collect()
+}
+
+/// A line sung word by word, the way Beautiful Lyrics sings: each word
+/// brightens from left to right in its own time, rises a little and glows
+/// while it is sung, and settles when the line is over. Left to right
+/// text only; right-to-left lines use [`lyric_row`].
+fn word_row(
+    ui: &mut egui::Ui,
+    words: &[TimedWord<'_>],
+    font: egui::FontId,
+    look: Look,
+    position_ms: u32,
+    sense: Sense,
+) -> egui::Response {
+    let width = ui.available_width();
+    let painter = ui.painter().clone();
+    let galleys: Vec<_> = words
+        .iter()
+        .map(|word| painter.layout_no_wrap(word.text.to_string(), font.clone(), look.color))
+        .collect();
+    let row_height = galleys
+        .iter()
+        .map(|galley| galley.size().y)
+        .fold(font.size * 1.2, f32::max);
+    // Flow the words into rows, breaking before a word that would not fit.
+    let mut places = Vec::with_capacity(galleys.len());
+    let (mut x, mut y) = (0.0f32, 0.0f32);
+    for (word, galley) in words.iter().zip(&galleys) {
+        let ink = layout_width(word.text, galley);
+        if x > 0.0 && x + ink > width {
+            x = 0.0;
+            y += row_height;
+        }
+        places.push(vec2(x, y));
+        x += galley.size().x;
+    }
+    let height = y + row_height;
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), sense);
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let hovered = response.hovered() && sense.senses_click();
+    let idle = idle_opacity(look.distance, hovered);
+    let base = idle + (IDLE_OPACITY.max(idle) - idle) * look.lit;
+    let light =
+        u32::from(look.color.r()) + u32::from(look.color.g()) + u32::from(look.color.b()) > 3 * 128;
+    let lift_by = font.size * 0.06;
+    for ((word, galley), place) in words.iter().zip(&galleys).zip(&places) {
+        let sung = (position_ms.saturating_sub(word.start) as f32
+            / word.end.saturating_sub(word.start).max(1) as f32)
+            .clamp(0.0, 1.0);
+        let sung = if look.sung >= 1.0 { 1.0 } else { sung };
+        // A word rises as it is sung and stays up until the line lets go.
+        let eased = sung * sung * (3.0 - 2.0 * sung);
+        let lift = lift_by * eased * look.lit;
+        let pos = rect.min + *place - vec2(0.0, lift);
+        painter.galley_with_override_text_color(
+            pos,
+            galley.clone(),
+            look.color.gamma_multiply(base),
+        );
+        if look.lit <= 0.001 || sung <= 0.0 {
+            continue;
+        }
+        let bright = look.color.gamma_multiply(look.lit);
+        let ink = layout_width(word.text, galley);
+        let word_rect = Rect::from_min_size(pos, vec2(ink, galley.size().y));
+        let feather = (row_height * 0.6).min(ink.max(1.0));
+        let front = sung * (ink + feather);
+        let glow_alpha = if light { glow(sung) * look.lit } else { 0.0 };
+        let solid = Rect::from_x_y_ranges(
+            word_rect.left()..=word_rect.left() + (front - feather).clamp(0.0, ink),
+            word_rect.top() - lift_by..=word_rect.bottom() + lift_by,
+        );
+        if solid.width() > 0.0 {
+            let clipped = painter.with_clip_rect(solid.intersect(painter.clip_rect()));
+            if glow_alpha > 0.01 {
+                let halo = look.color.gamma_multiply(0.09 * glow_alpha);
+                let radius = row_height * 0.1;
+                for step in 0..8 {
+                    let angle = step as f32 * std::f32::consts::TAU / 8.0;
+                    clipped.galley_with_override_text_color(
+                        pos + vec2(angle.cos(), angle.sin()) * radius,
+                        galley.clone(),
+                        halo,
+                    );
+                }
+            }
+            clipped.galley_with_override_text_color(pos, galley.clone(), bright);
+        }
+        for strip in 0..SWEEP_STRIPS {
+            let from = front - feather + feather * strip as f32 / SWEEP_STRIPS as f32;
+            let to = from + feather / SWEEP_STRIPS as f32;
+            let (from, to) = (from.clamp(0.0, ink), to.clamp(0.0, ink));
+            if to <= from {
+                continue;
+            }
+            let clip = Rect::from_x_y_ranges(
+                word_rect.left() + from..=word_rect.left() + to,
+                solid.y_range(),
+            );
+            let alpha = 1.0 - (strip as f32 + 0.5) / SWEEP_STRIPS as f32;
+            painter
+                .with_clip_rect(clip.intersect(painter.clip_rect()))
+                .galley_with_override_text_color(pos, galley.clone(), bright.gamma_multiply(alpha));
+        }
+    }
+    response
+}
+
+/// The width of a word's letters, leaving out its trailing space.
+fn layout_width(text: &str, galley: &egui::Galley) -> f32 {
+    let trailing = text.chars().rev().take_while(|c| c.is_whitespace()).count();
+    if trailing == 0 {
+        return galley.size().x;
+    }
+    galley
+        .rows
+        .first()
+        .and_then(|row| {
+            let glyphs = &row.row.glyphs;
+            let last = glyphs.len().checked_sub(trailing + 1)?;
+            let glyph = glyphs.get(last)?;
+            Some(glyph.pos.x + glyph.advance_width)
+        })
+        .unwrap_or(galley.size().x)
+}
+
 /// Lays out and paints one line of lyrics, the full width of `ui`.
 fn lyric_row(
     ui: &mut egui::Ui,
@@ -422,12 +609,29 @@ fn lines(
             }
             continue;
         }
-        let sung = if lyrics.synced && active.is_some_and(|active| index <= active) {
-            sung_fraction(lyrics, index, now.position_ms)
+        let words = if lyrics.synced && !crate::bidi::is_rtl(&line.text) {
+            timed_words(lyrics, index)
         } else {
-            0.0
+            Vec::new()
         };
-        drawn.animating |= is_active && now.playing && sung < 1.0;
+        let sung = if !lyrics.synced || active.is_none_or(|active| index > active) {
+            0.0
+        } else if index < active.unwrap_or(index) {
+            1.0
+        } else if let Some(last) = words.last() {
+            let first = words.first().map_or(last.start, |word| word.start);
+            (now.position_ms.saturating_sub(first) as f32
+                / last.end.saturating_sub(first).max(1) as f32)
+                .clamp(0.0, 0.999)
+        } else {
+            sung_fraction(lyrics, index, now.position_ms)
+        };
+        drawn.animating |= is_active
+            && now.playing
+            && match words.last() {
+                Some(last) => now.position_ms < last.end + 600,
+                None => sung < 1.0,
+            };
         let look = Look {
             color: style.color,
             lit: if lyrics.synced { lit } else { 1.0 },
@@ -449,7 +653,11 @@ fn lines(
         let response = ui
             .scope(|ui| {
                 ui.multiply_opacity(edge);
-                lyric_row(ui, &line.text, font.clone(), look, sense)
+                if words.is_empty() {
+                    lyric_row(ui, &line.text, font.clone(), look, sense)
+                } else {
+                    word_row(ui, &words, font.clone(), look, now.position_ms, sense)
+                }
             })
             .inner;
         if style.autoscroll_rows {
@@ -1226,7 +1434,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
 mod tests {
     use super::{
         fullscreen_content_width, gap_fraction, glow, idle_opacity, preferred_backdrop_art,
-        sung_fraction,
+        sung_fraction, timed_words,
     };
     use crate::lyrics::{Line, Lyrics};
 
@@ -1237,6 +1445,7 @@ mod tests {
                 .map(|(at_ms, text)| Line {
                     at_ms: Some(*at_ms),
                     text: (*text).to_string(),
+                    words: Vec::new(),
                 })
                 .collect(),
             synced: true,
@@ -1272,6 +1481,35 @@ mod tests {
         assert_eq!(gap_fraction(&lyrics, Some(1), 6_000), 0.0);
         assert!((gap_fraction(&lyrics, Some(1), 9_000) - 0.75).abs() < 1e-3);
         assert_eq!(gap_fraction(&lyrics, Some(1), 12_000), 1.0);
+    }
+
+    /// Lines timed only by line still light word by word, in order and
+    /// within the line's sweep; word stamps are used as they are.
+    #[test]
+    fn every_timed_line_is_sung_word_by_word() {
+        let lyrics = timed(&[(1_000, "Every window holding"), (9_000, "")]);
+        let words = timed_words(&lyrics, 0);
+        let texts: Vec<&str> = words.iter().map(|word| word.text).collect();
+        assert_eq!(texts, ["Every ", "window ", "holding"]);
+        assert_eq!(words[0].start, 1_000);
+        assert!(words.windows(2).all(|pair| pair[0].end == pair[1].start));
+        assert!(words[2].end <= 9_000);
+
+        let mut stamped = timed(&[(1_000, "Hey you"), (5_000, "")]);
+        stamped.lines[0].words = vec![
+            crate::lyrics::Word {
+                at_ms: 1_000,
+                text: "Hey ".into(),
+            },
+            crate::lyrics::Word {
+                at_ms: 1_800,
+                text: "you".into(),
+            },
+        ];
+        let words = timed_words(&stamped, 0);
+        assert_eq!((words[0].start, words[0].end), (1_000, 1_800));
+        assert_eq!(words[1].start, 1_800);
+        assert!(words[1].end > 1_800 && words[1].end <= 5_000);
     }
 
     #[test]

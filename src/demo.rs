@@ -644,6 +644,7 @@ fn sample_lyrics() -> crate::lyrics::Lyrics {
             .map(|(at_ms, text)| crate::lyrics::Line {
                 at_ms: Some(*at_ms),
                 text: (*text).to_string(),
+                words: Vec::new(),
             })
             .collect(),
         synced: true,
@@ -1896,7 +1897,8 @@ mod tests {
                     ),
                     (
                         Loadable::Loaded(Some(sample_lyrics())),
-                        vec![sample_lyrics().lines[0].text.clone()],
+                        // Timed lyrics are painted word by word.
+                        vec!["Streetlights ".to_string()],
                     ),
                 ] {
                     app.lyrics = state;
@@ -6021,9 +6023,7 @@ mod tests {
                 );
                 output.textures_delta.clear();
                 centre = output.shapes.iter().find_map(|shape| match &shape.shape {
-                    egui::Shape::Text(text)
-                        if text.galley.job.text == "Somewhere past the county line" =>
-                    {
+                    egui::Shape::Text(text) if text.galley.job.text == "Somewhere " => {
                         Some(text.pos.y + text.galley.size().y / 2.0)
                     }
                     _ => None,
@@ -6073,7 +6073,7 @@ mod tests {
                 output.textures_delta.clear();
                 shapes = output.shapes;
             }
-            let lyric = find(&shapes, "Somewhere past the county line");
+            let lyric = find(&shapes, "Somewhere ");
             let detail = find(&shapes, "No timed lyrics for this track.");
             if words {
                 let lyric = lyric.expect("the words are drawn");
@@ -6188,8 +6188,7 @@ mod tests {
                         .iter()
                         .find_map(|shape| {
                             if let egui::Shape::Text(text) = &shape.shape
-                                && text.galley.job.text
-                                    == "Streetlights blinking down the river road"
+                                && text.galley.job.text == "Streetlights "
                             {
                                 Some(text.galley.size())
                             } else {

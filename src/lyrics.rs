@@ -37,6 +37,17 @@ pub struct Line {
     /// When the line starts; `None` in lyrics that carry no timing.
     pub at_ms: Option<u32>,
     pub text: String,
+    /// When each word starts, for lyrics timed word by word (enhanced
+    /// LRC). Empty for lyrics timed only by line. The words' texts, spaces
+    /// included, join up to `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<Word>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Word {
+    pub at_ms: u32,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,7 +76,10 @@ impl Lyrics {
 /// Parses Spotify's `color-lyrics` response.
 pub fn from_spotify(json: &serde_json::Value) -> Option<Lyrics> {
     let lyrics = json.get("lyrics")?;
-    let synced = lyrics.get("syncType").and_then(|value| value.as_str()) == Some("LINE_SYNCED");
+    let synced = matches!(
+        lyrics.get("syncType").and_then(|value| value.as_str()),
+        Some("LINE_SYNCED" | "SYLLABLE_SYNCED")
+    );
     let lines: Vec<Line> = lyrics
         .get("lines")?
         .as_array()?
@@ -87,6 +101,7 @@ pub fn from_spotify(json: &serde_json::Value) -> Option<Lyrics> {
             Some(Line {
                 at_ms,
                 text: text.to_string(),
+                words: Vec::new(),
             })
         })
         .collect();
@@ -238,6 +253,7 @@ impl Record {
                 .map(|line| Line {
                     at_ms: None,
                     text: line.trim_end().to_string(),
+                    words: Vec::new(),
                 })
                 .collect(),
             synced: false,
@@ -531,16 +547,76 @@ pub fn parse_lrc(text: &str) -> Vec<Line> {
         if times.is_empty() {
             continue;
         }
-        let body = rest.trim();
+        let (body, words) = word_stamps(rest.trim());
         for at_ms in times {
             lines.push(Line {
                 at_ms: Some(at_ms),
-                text: body.to_string(),
+                text: body.clone(),
+                words: words.clone(),
             });
         }
     }
     lines.sort_by_key(|line| line.at_ms);
     lines
+}
+
+/// Splits enhanced LRC's `<mm:ss.xx>` word stamps out of a line body: the
+/// words as they read, and when each starts. A body without them is
+/// returned as it is, with no words.
+fn word_stamps(body: &str) -> (String, Vec<Word>) {
+    if !body.contains('<') {
+        return (body.to_string(), Vec::new());
+    }
+    let mut text = String::new();
+    let mut words: Vec<Word> = Vec::new();
+    let mut rest = body;
+    while !rest.is_empty() {
+        let stamp = rest
+            .strip_prefix('<')
+            .and_then(|inner| Some((inner, inner.find('>')?)))
+            .and_then(|(inner, close)| {
+                let at = leading_stamp(&format!("[{}]", &inner[..close]))?.0;
+                Some((at, close + 2))
+            });
+        match stamp {
+            Some((at_ms, length)) => {
+                rest = &rest[length..];
+                let next = rest.find('<').unwrap_or(rest.len());
+                let word = &rest[..next];
+                rest = &rest[next..];
+                if !word.is_empty() {
+                    words.push(Word {
+                        at_ms,
+                        text: word.to_string(),
+                    });
+                    text.push_str(word);
+                }
+            }
+            None => {
+                // Not a stamp after all: keep the character as words.
+                let mut chars = rest.chars();
+                let c = chars.next().unwrap_or_default();
+                rest = chars.as_str();
+                text.push(c);
+                if let Some(last) = words.last_mut() {
+                    last.text.push(c);
+                }
+            }
+        }
+    }
+    let trimmed = text.trim();
+    if words.is_empty() || trimmed.is_empty() {
+        return (trimmed.to_string(), Vec::new());
+    }
+    // The words must join up to the trimmed text.
+    if let Some(first) = words.first_mut() {
+        first.text = first.text.trim_start().to_string();
+    }
+    if let Some(last) = words.last_mut() {
+        last.text = last.text.trim_end().to_string();
+    }
+    words.retain(|word| !word.text.is_empty());
+    (trimmed.to_string(), words)
 }
 
 /// A timestamp at the head of `text`: its milliseconds and its length.
@@ -743,5 +819,26 @@ mod tests {
         assert_eq!(plain.lines.len(), 1);
         let nothing = Record::default();
         assert!(nothing.lyrics().is_none());
+    }
+
+    /// Enhanced LRC times each word; the line keeps the plain words.
+    #[test]
+    fn enhanced_lrc_word_stamps_time_each_word() {
+        let lines = parse_lrc(
+            "[00:12.00]<00:12.00>Hello <00:12.50>dear <00:13.25>world\n[00:15.00]Plain line",
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "Hello dear world");
+        let words: Vec<(u32, &str)> = lines[0]
+            .words
+            .iter()
+            .map(|word| (word.at_ms, word.text.as_str()))
+            .collect();
+        assert_eq!(
+            words,
+            [(12_000, "Hello "), (12_500, "dear "), (13_250, "world")]
+        );
+        assert!(lines[1].words.is_empty());
+        assert_eq!(lines[1].text, "Plain line");
     }
 }
