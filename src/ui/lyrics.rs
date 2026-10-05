@@ -326,7 +326,7 @@ fn word_row(
         // cover's colour, strongest on the word being sung.
         let glow_alpha = match look.glow {
             _ if !light_text => 0.0,
-            Some(_) => smooth(sung * 4.0) * (0.4 + 0.6 * pop) * look.lit,
+            Some(_) => smooth(sung * 4.0) * (0.6 + 0.4 * pop) * look.lit,
             None => glow(sung) * look.lit,
         };
         let solid = Rect::from_x_y_ranges(
@@ -338,23 +338,36 @@ fn word_row(
             if glow_alpha > 0.01 {
                 // Copies of the word in rings around it: one ring in the
                 // panel, and three of light, each wider and fainter, in
-                // full screen.
+                // full screen. No ring reaches further than a letter's
+                // stroke is thick, or the copies would show as ghosts.
                 let rings: &[(f32, f32)] = match look.glow {
-                    Some(_) => &[(0.06, 0.1), (0.13, 0.055), (0.21, 0.025)],
+                    Some(_) => &[(0.035, 0.04), (0.07, 0.028), (0.105, 0.016)],
                     None => &[(0.1, 0.09)],
                 };
+                let copies = if look.glow.is_some() { 12 } else { 8 };
+                // The glow spills past the word's own edge on the left,
+                // where the sweep began, rather than being cut there.
+                let spill = match look.glow {
+                    Some(_) => row_height * 0.12,
+                    None => 0.0,
+                };
+                let around = painter.with_clip_rect(
+                    (zoom * Rect::from_min_max(pos2(solid.left() - spill, solid.top()), solid.max))
+                        .intersect(painter.clip_rect()),
+                );
                 for (ring, &(reach, strength)) in rings.iter().enumerate() {
                     let halo = match look.glow {
                         Some(pulse) => light(
-                            lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.45),
+                            lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.6),
                             strength * glow_alpha,
                         ),
                         None => look.color.gamma_multiply(strength * glow_alpha),
                     };
-                    for step in 0..8 {
-                        let angle = (step as f32 + ring as f32 * 0.5) * std::f32::consts::TAU / 8.0;
+                    for step in 0..copies {
+                        let angle = (step as f32 + ring as f32 * 0.5) * std::f32::consts::TAU
+                            / copies as f32;
                         paint_galley(
-                            &clipped,
+                            &around,
                             pos + vec2(angle.cos(), angle.sin()) * row_height * reach,
                             galley,
                             halo,
@@ -1207,7 +1220,7 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
                 Default::default(),
             ),
             Loadable::NotLoaded | Loadable::Loading => {
-                (gettext(app.locale, "Loading…"), Default::default())
+                (gettext(app.locale, "Loadingâ€¦"), Default::default())
             }
         };
         let heading = ui.painter().text(
