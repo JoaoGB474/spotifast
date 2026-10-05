@@ -1075,10 +1075,17 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             }
             // Full-screen lyrics drawn in the window as it is, for shots at
             // a chosen size, which a real full screen would override.
-            "lyrics-fullscreen-view" | "lyrics-fullscreen-instrumental" => {
+            "lyrics-fullscreen-view"
+            | "lyrics-fullscreen-instrumental"
+            | "lyrics-fullscreen-interlude" => {
                 app.lyrics_uri = app.now_playing().map(|now| now.uri);
                 let mut lyrics = sample_lyrics();
                 lyrics.instrumental = surface == "lyrics-fullscreen-instrumental";
+                // A pause in the singing where the current line would be,
+                // so the interlude dots show.
+                if surface == "lyrics-fullscreen-interlude" {
+                    lyrics.lines[7].text.clear();
+                }
                 app.lyrics = Loadable::Loaded(Some(lyrics));
                 app.lyrics_following = true;
                 app.show_lyrics_panel = true;

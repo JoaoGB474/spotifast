@@ -227,6 +227,14 @@ pub fn bold(size: f32) -> egui::FontId {
     fastframe_fonts::Weight::Bold.font_id(size)
 }
 
+/// The face the lyrics are sung in: Figtree ExtraBold, a heavy, friendly
+/// display sans, with Inter Bold behind it for the scripts it lacks.
+pub const LYRICS_FAMILY: &str = "lyrics";
+
+pub fn lyrics(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(LYRICS_FAMILY.into()))
+}
+
 /// How the desktop renders text, read once per process.
 ///
 /// Tests use the platform's default instead of asking the desktop, so they
@@ -376,6 +384,22 @@ fn install_fonts(ctx: &egui::Context) {
     let mut fonts = fastframe_fonts::FontSetup::default()
         .companion("noto_emoji", std::sync::Arc::new(emoji))
         .definitions();
+    let figtree =
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Figtree-ExtraBold.ttf"));
+    fonts
+        .font_data
+        .insert("figtree-extrabold".into(), std::sync::Arc::new(figtree));
+    let mut lyrics = vec!["figtree-extrabold".to_owned()];
+    lyrics.extend(
+        fonts
+            .families
+            .get(&fastframe_fonts::Weight::Bold.family())
+            .cloned()
+            .unwrap_or_default(),
+    );
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(LYRICS_FAMILY.into()), lyrics);
     text_rendering().apply_to(&mut fonts);
     ctx.set_fonts(fonts);
 }
