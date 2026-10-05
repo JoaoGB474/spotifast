@@ -44,7 +44,8 @@ fn glew_library(lib: &std::path::Path) -> Option<&'static str> {
 
 fn main() {
     fastframe_i18n::build::compile_catalogs("assets/i18n");
-    #[cfg(windows)]
+    // Checked against the target, not the host, so a cross build from Linux
+    // with mingw's windres still gives the .exe its icon.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rerun-if-changed=packaging/windows/spotifast.ico");
         let mut resource = winresource::WindowsResource::new();
@@ -55,6 +56,9 @@ fn main() {
         if let Err(error) = resource.compile() {
             println!("cargo:warning=Windows resources not embedded: {error}");
         }
+    }
+    #[cfg(windows)]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         // Static libprojectM requires the GLEW library installed by vcpkg.
         if std::env::var_os("CARGO_FEATURE_MILKDROP").is_some() {
             println!("cargo:rerun-if-env-changed=VCPKG_INSTALLATION_ROOT");

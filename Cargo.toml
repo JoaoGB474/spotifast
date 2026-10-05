@@ -190,6 +190,9 @@ x11rb = { version = "0.13", default-features = false }
 # Drops unfinished PO entries and compiles catalog text and gettext plural
 # expressions to Rust. Ordinary builds do not need gettext tools.
 fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1", features = ["build"] }
+# Embeds the icon and version info in the Windows .exe; needed on every host
+# so cross builds with mingw's windres get the icon too.
+winresource = "0.1"
 
 [dev-dependencies]
 # Checks that every catalog covers the template and keeps its placeholders.
@@ -198,8 +201,6 @@ polib = "0.3"
 tokio = { version = "1", features = ["test-util"] }
 
 # The icon and version information Windows shows for the executable.
-[target.'cfg(windows)'.build-dependencies]
-winresource = "0.1"
 
 [features]
 default = ["milkdrop"]
