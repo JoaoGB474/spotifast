@@ -843,13 +843,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ),
         )
         .when(cfg!(target_os = "macos")),
-        RowText::new(
-            beautiful_lyrics.clone(),
-            gettext(
-                locale,
-                "Asks the Beautiful Lyrics server first, sending your Spotify session token. Unofficial, and it may stop working.",
-            ),
-        ),
         RowText::new(gettext(locale, "Local files"), local_files_detail(app)),
         RowText::new(
             show_in_dock.clone(),
@@ -866,6 +859,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         )
         .when(!cfg!(target_os = "macos")),
         RowText::new(start_with_computer.clone(), start_detail).when(start_available),
+        RowText::new(
+            beautiful_lyrics.clone(),
+            gettext(
+                locale,
+                "Asks the Beautiful Lyrics server first, sending your Spotify session token. Unofficial, and it may stop working.",
+            ),
+        ),
     ];
     for index in [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 14] {
         playback_rows[index].available &= built_in;
@@ -993,7 +993,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     playback_dirty = true;
                 }
             });
-            filtered_row(ui, &palette, &needle, &playback, &playback_rows[15], |ui| {
+            filtered_row(ui, &palette, &needle, &playback, &playback_rows[18], |ui| {
                 if widgets::switch(
                     ui,
                     &palette,
