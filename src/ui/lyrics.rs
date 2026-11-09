@@ -517,6 +517,13 @@ fn word_row(
             * zoom_about(word_rect.center(), 0.4 + 0.6 * assemble);
         paint_galley(
             &painter,
+            pos + vec2(0.0, 1.5),
+            galley,
+            Color32::from_black_alpha(140).gamma_multiply(base * assemble),
+            zoom,
+        );
+        paint_galley(
+            &painter,
             pos,
             galley,
             look.color.gamma_multiply(base * assemble),
@@ -2036,7 +2043,7 @@ fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(33));
     }
-    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(72));
+    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(115));
     fx.aurora(&painter, rect, low, high, time);
     fx.wave(&painter, rect, low, high);
     fx.embers(&painter, rect, low, time);
