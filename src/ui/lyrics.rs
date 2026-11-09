@@ -349,8 +349,8 @@ fn word_row(
         let strength =
             |index: usize| {
                 look.lit
-                    * (0.2 + 0.4 * states[index].1)
-                    * (0.7 + 0.2 * pulse.bass + 0.1 * pulse.beat)
+                    * (0.08 + 0.18 * states[index].1)
+                    * (0.6 + 0.15 * pulse.bass + 0.1 * pulse.beat)
             };
         // Softer and less bright than the cover's colour, so the words on
         // top stay readable.
@@ -438,7 +438,7 @@ fn word_row(
                     // Fade the glow out at the ends of each word too, so it
                     // never stops in a hard edge.
                     let ends = smooth((t.min(1.0 - t) * 4.0).min(1.0));
-                    let color = light(color, 0.6 * level * reached * ends);
+                    let color = light(color, 0.3 * level * reached * ends);
                     let at = mesh.vertices.len() as u32;
                     for y in [field.top(), field.bottom()] {
                         mesh.vertices.push(egui::epaint::Vertex {
