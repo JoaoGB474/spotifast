@@ -928,9 +928,26 @@ fn read_cache(path: &PathBuf) -> Option<Option<Lyrics>> {
 
 fn read_cache_contents(path: &Path) -> Option<Option<Lyrics>> {
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<Cached>(&text)
-        .ok()
-        .map(|cached| cached.found)
+    let found = serde_json::from_str::<Cached>(&text).ok()?.found;
+    Some(found.map(repair_stamped_text))
+}
+
+/// Lyrics saved before timestamps were read come back as plain lines that
+/// still carry their `[mm:ss.xx]` stamps; read those stamps again.
+fn repair_stamped_text(lyrics: Lyrics) -> Lyrics {
+    if lyrics.synced || !lyrics.lines.iter().any(|line| leading_stamp(&line.text).is_some()) {
+        return lyrics;
+    }
+    let text: String = lyrics
+        .lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    match from_text(&text) {
+        Some(repaired) if repaired.synced => repaired,
+        _ => lyrics,
+    }
 }
 
 fn write_cache(path: &Path, found: &Option<Lyrics>) {
