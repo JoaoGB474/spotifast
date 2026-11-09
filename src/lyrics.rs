@@ -995,6 +995,31 @@ pub fn from_yrc(text: &str) -> Option<Lyrics> {
     })
 }
 
+/// About how many syllables `text` has: runs of vowels in Latin letters, and
+/// one per character in scripts without them, such as Chinese or Japanese.
+pub fn syllables(text: &str) -> u32 {
+    const VOWELS: &str = "aeiouyáéíóúâêôãõàèìòùäëïöüō";
+    let mut count = 0;
+    let mut in_vowel = false;
+    for c in text.chars() {
+        let lower = c.to_lowercase().next().unwrap_or(c);
+        if VOWELS.contains(lower) {
+            if !in_vowel {
+                count += 1;
+            }
+            in_vowel = true;
+        } else {
+            in_vowel = false;
+            if c.is_alphabetic() && !c.is_ascii() && !"çñß".contains(lower) {
+                count += 1;
+            } else if c.is_ascii_alphabetic() || "çñß".contains(lower) {
+                continue;
+            }
+        }
+    }
+    count.max(1)
+}
+
 /// Letters and digits only, in lower case, so titles compare across
 /// punctuation and spacing.
 fn plain(text: &str) -> String {
@@ -1004,8 +1029,9 @@ fn plain(text: &str) -> String {
         .collect()
 }
 
-/// The NetEase song that is this track: the same title, a matching artist
-/// and a length within three seconds.
+/// The NetEase song that is this track: the same title (or one that holds
+/// it, as a version with extra words does), a matching artist, and a length
+/// within five seconds.
 fn netease_pick(json: &serde_json::Value, query: &Query) -> Option<u64> {
     let title = plain(&clean_title(&query.title));
     let artist = plain(&clean_artist(&query.artist));
@@ -1016,18 +1042,22 @@ fn netease_pick(json: &serde_json::Value, query: &Query) -> Option<u64> {
         .find_map(|song| {
             let name = plain(song.get("name")?.as_str()?);
             let length = song.get("dt")?.as_u64()?;
-            let artist_matches = song
-                .get("ar")?
-                .as_array()?
-                .iter()
-                .filter_map(|credit| credit.get("name")?.as_str())
-                .map(plain)
-                .any(|credited| {
-                    !credited.is_empty()
-                        && (artist.contains(&credited) || credited.contains(&artist))
-                });
-            let close = (length as i64 - query.duration_ms as i64).abs() <= 3_000;
-            if name == title && artist_matches && close {
+            let title_matches = name == title
+                || (title.chars().count() >= 4 && name.contains(&title))
+                || (name.chars().count() >= 4 && title.contains(&name));
+            let artist_matches = artist.is_empty()
+                || song
+                    .get("ar")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|credit| credit.get("name")?.as_str())
+                    .map(plain)
+                    .any(|credited| {
+                        !credited.is_empty()
+                            && (artist.contains(&credited) || credited.contains(&artist))
+                    });
+            let close = (length as i64 - query.duration_ms as i64).abs() <= 5_000;
+            if title_matches && artist_matches && close {
                 song.get("id")?.as_u64()
             } else {
                 None
@@ -1035,10 +1065,23 @@ fn netease_pick(json: &serde_json::Value, query: &Query) -> Option<u64> {
         })
 }
 
+/// NetEase's search results for `words`, as the search endpoint returns them.
+async fn netease_search(http: &reqwest::Client, words: &str) -> Result<serde_json::Value> {
+    Ok(http
+        .get(NETEASE_SEARCH)
+        .query(&[("s", words), ("type", "1"), ("limit", "5"), ("offset", "0")])
+        .header(reqwest::header::REFERER, "https://music.163.com")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
 /// NetEase's word-timed words for the track, cached like LRCLIB's answers.
 pub async fn netease(http: &reqwest::Client, cache_dir: &Path, query: &Query) -> Option<Lyrics> {
     let path = cache_dir.join(format!("netease-{}.json", cache_key(query)));
-    if let Some(cached) = read_cache(&path) {
+    if let Some(cached) = cached(&path) {
         return cached;
     }
     let found = tokio::time::timeout(LOOKUP_TIMEOUT, netease_lookup(http, query))
@@ -1056,17 +1099,17 @@ async fn netease_lookup(http: &reqwest::Client, query: &Query) -> Result<Option<
     if title.is_empty() {
         return Ok(None);
     }
-    let search = format!("{artist} {title}");
-    let found: serde_json::Value = http
-        .get(NETEASE_SEARCH)
-        .query(&[("s", search.as_str()), ("type", "1"), ("limit", "5"), ("offset", "0")])
-        .header(reqwest::header::REFERER, "https://music.163.com")
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let Some(id) = netease_pick(&found, query) else {
+    // The artist first, then the title alone for songs NetEase files under
+    // another artist name.
+    let mut id = None;
+    for words in [format!("{artist} {title}"), title.clone()] {
+        let found = netease_search(http, &words).await?;
+        if let Some(picked) = netease_pick(&found, query) {
+            id = Some(picked);
+            break;
+        }
+    }
+    let Some(id) = id else {
         return Ok(None);
     };
     let body: serde_json::Value = http

@@ -225,7 +225,7 @@ fn timed_words(lyrics: &crate::lyrics::Lyrics, index: usize) -> Vec<TimedWord<'_
     let pieces: Vec<&str> = line.text.split_inclusive(char::is_whitespace).collect();
     // A small share per word on top of its letters, so short words still
     // get a beat of their own.
-    let weight = |text: &str| length(text) + 2;
+    let weight = |text: &str| crate::lyrics::syllables(text) + 1;
     let total: u32 = pieces.iter().map(|piece| weight(piece)).sum::<u32>().max(1);
     let mut before = 0;
     pieces
