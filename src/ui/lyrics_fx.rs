@@ -230,7 +230,7 @@ impl Fx {
                     around.cos() * rect.width() * 0.36,
                     (around * 1.4 + phase).sin() * rect.height() * 0.32,
                 );
-            let breathe = 1.0 + 0.08 * (time * 0.3 + phase).sin() + 0.14 * self.bass;
+            let breathe = 1.0 + 0.05 * (time * 0.2 + phase).sin() + 0.1 * self.bass;
             let strength = 0.07 + 0.1 * self.level + 0.1 * self.beat;
             let radii = vec2(1.15, 0.85) * reach * size * breathe;
             blob(&mut mesh, center, radii, light(color, strength));

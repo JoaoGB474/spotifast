@@ -167,8 +167,8 @@ fn row_spring(ctx: &egui::Context, id: egui::Id, top: f32, distance: usize, reac
     if (y - top).abs() > reach {
         y = top - reach.copysign(top - y);
     }
-    let stiffness = 150.0 / (1.0 + 0.3 * distance.min(12) as f32);
-    let damping = 2.0 * 0.7 * stiffness.sqrt();
+    let stiffness = 80.0 / (1.0 + 0.3 * distance.min(12) as f32);
+    let damping = 2.0 * 0.95 * stiffness.sqrt();
     // Small steps keep the spring steady at any frame rate.
     let h = dt / 4.0;
     for _ in 0..4 {
@@ -2159,7 +2159,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                     size,
                     gap: size * 0.62,
                     id: egui::Id::new("lyric-line").with(("fullscreen", &now.uri)),
-                    light_up: 0.3,
+                    light_up: 0.45,
                     follow,
                     animation: Some(animation),
                     viewport: Some(viewport),
