@@ -1292,12 +1292,35 @@ fn chrome_opacity(ctx: &egui::Context) -> f32 {
 /// Seconds the pointer rests before the full screen controls fade.
 const CHROME_REST_SECONDS: f32 = 2.5;
 
+/// A quiet note in the corner: whether the words follow syllable by
+/// syllable or only line by line.
+fn lyrics_status(app: &App, ui: &egui::Ui, rect: Rect) {
+    let Loadable::Loaded(Some(lyrics)) = &app.lyrics else {
+        return;
+    };
+    let text = if lyrics.lines.iter().any(|line| !line.words.is_empty()) {
+        "Letra a letra"
+    } else if lyrics.synced {
+        "Linha por linha"
+    } else {
+        "Sem sincronia"
+    };
+    ui.painter().text(
+        rect.right_bottom() - vec2(16.0, 12.0),
+        egui::Align2::RIGHT_BOTTOM,
+        text,
+        egui::FontId::proportional(11.0),
+        Color32::from_white_alpha(110),
+    );
+}
+
 pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
     egui::CentralPanel::default()
         .frame(Frame::new().fill(theme::Palette::dark().window))
         .show(ui, |ui| {
             let rect = ui.max_rect();
             background(app, ui, rect);
+            lyrics_status(app, ui, rect);
             // The empty space is the backdrop's switch, as the player bar's
             // is its visualizer's. Everything drawn after this takes its own
             // clicks, and a drag is no click.
