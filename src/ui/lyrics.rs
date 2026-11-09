@@ -349,10 +349,12 @@ fn word_row(
         let strength =
             |index: usize| {
                 look.lit
-                    * (0.4 + 0.85 * states[index].1)
-                    * (0.8 + 0.35 * pulse.bass + 0.25 * pulse.beat)
+                    * (0.2 + 0.4 * states[index].1)
+                    * (0.7 + 0.2 * pulse.bass + 0.1 * pulse.beat)
             };
-        let color = lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.3);
+        // Softer and less bright than the cover's colour, so the words on
+        // top stay readable.
+        let color = lyrics_fx::mix(pulse.accent, Color32::BLACK, 0.15);
         let mut start = 0;
         while start < words.len() {
             // The words that share this row.
@@ -433,7 +435,10 @@ fn word_row(
                     } else {
                         ((front - x) / feather).clamp(0.0, 1.0)
                     };
-                    let color = light(color, level * reached);
+                    // Fade the glow out at the ends of each word too, so it
+                    // never stops in a hard edge.
+                    let ends = smooth((t.min(1.0 - t) * 4.0).min(1.0));
+                    let color = light(color, 0.6 * level * reached * ends);
                     let at = mesh.vertices.len() as u32;
                     for y in [field.top(), field.bottom()] {
                         mesh.vertices.push(egui::epaint::Vertex {
