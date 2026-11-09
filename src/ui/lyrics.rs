@@ -476,14 +476,28 @@ fn word_row(
         } else {
             0.0
         };
-        let lift = lift_by * eased * look.lit + float;
+        // While the line is being sung its words ripple, each a little
+        // behind the one before, with the song's loudness.
+        let ripple = match look.glow {
+            Some(glow) if look.lit > 0.01 && sung > 0.0 && sung < 1.0 => {
+                (time * 6.0 - index as f32 * 0.9).sin()
+                    * font.size
+                    * 0.045
+                    * look.lit
+                    * (0.6 + 0.8 * glow.bass)
+            }
+            _ => 0.0,
+        };
+        let lift = lift_by * eased * look.lit + float + ripple;
         let pos = rect.min + *place - vec2(0.0, lift);
         let ink = layout_width(word.text, galley);
         let word_rect = Rect::from_min_size(pos, vec2(ink, galley.size().y));
+        // The line kicks a little on each beat while it is sung.
+        let kick = look.glow.map_or(0.0, |glow| 0.035 * glow.beat * look.lit);
         let zoom = line_zoom
             * zoom_about(
                 pos2(word_rect.center().x, word_rect.bottom()),
-                1.0 + (0.03 + 0.1 * held) * pop,
+                1.0 + (0.03 + 0.1 * held) * pop + kick,
             );
         paint_galley(&painter, pos, galley, look.color.gamma_multiply(base), zoom);
         if look.lit <= 0.001 || sung <= 0.0 {
