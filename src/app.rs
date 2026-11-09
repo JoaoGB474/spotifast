@@ -12483,11 +12483,9 @@ impl App {
     fn leave_lyrics_fullscreen(&mut self, ctx: &egui::Context) {
         self.end_immersive();
         if let Some(was_fullscreen) = self.lyrics_fullscreen.take() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(was_fullscreen));
-            if self.lyrics_restore_maximized {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-            }
-            self.lyrics_fullscreen_restoring = Some(was_fullscreen);
+            // The view never changed the window, so leaving leaves it as
+            // it is: F11 alone takes the window in and out of full screen.
+            let _ = was_fullscreen;
             self.lyrics_fullscreen_seen = false;
             self.lyrics_line_shown = None;
             if std::mem::take(&mut self.skin_return) {
@@ -14856,12 +14854,9 @@ impl App {
             self.lyrics_fullscreen_restoring = None;
             self.lyrics_restore_maximized = false;
         }
-        if self.lyrics_fullscreen.is_some() {
-            if ctx.input(|input| input.viewport().fullscreen.unwrap_or(false)) {
-                self.lyrics_fullscreen_seen = true;
-            } else if self.lyrics_fullscreen_seen {
-                self.leave_lyrics_fullscreen(ctx);
-            }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
+            let full = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
         }
         // Switch to the main window when sign-in is required.
         let needs_sign_in = !(self.is_connected() && self.user.is_some())
