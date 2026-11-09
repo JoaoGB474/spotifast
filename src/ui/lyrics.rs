@@ -927,7 +927,9 @@ fn lines(
         };
         drawn.animating |= lit > 0.0 && lit < 1.0;
         // In full screen the rows follow on springs, in a staggered wave.
-        let shift = if style.glow.is_some() && lyrics.synced {
+        // Each row assembles when its song opens: a cascade that rises into
+        // place and fades in, one row after the one above it.
+        let (shift, enter) = if style.glow.is_some() && lyrics.synced {
             let (offset, moving) = row_spring(
                 ui.ctx(),
                 style.id.with(("spring", index)),
@@ -935,10 +937,24 @@ fn lines(
                 distance,
                 style.size * 10.0,
             );
-            drawn.animating |= moving;
-            TSTransform::from_translation(vec2(0.0, offset))
+            let now = ui.input(|input| input.time);
+            let born_id = style.id.with(("born", index));
+            let born = ui
+                .ctx()
+                .data(|data| data.get_temp::<f64>(born_id))
+                .unwrap_or_else(|| {
+                    ui.ctx().data_mut(|data| data.insert_temp(born_id, now));
+                    now
+                });
+            let enter = smooth(((now - born) as f32 - index.min(14) as f32 * 0.07) / 0.8);
+            drawn.animating |= moving || enter < 1.0;
+            let rise = (1.0 - enter) * style.size * 1.2;
+            (
+                TSTransform::from_translation(vec2(0.0, offset + rise)),
+                enter,
+            )
         } else {
-            TSTransform::IDENTITY
+            (TSTransform::IDENTITY, 1.0)
         };
         // A timed line with no words is the band playing on.
         if line.text.trim().is_empty() && lyrics.synced {
@@ -1004,7 +1020,7 @@ fn lines(
         });
         let response = ui
             .scope(|ui| {
-                ui.multiply_opacity(edge);
+                ui.multiply_opacity(edge * enter);
                 ui.with_visual_transform(shift, |ui| {
                     if words.is_empty() {
                         lyric_row(ui, &line.text, font.clone(), look, sense)
