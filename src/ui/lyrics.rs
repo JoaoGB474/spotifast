@@ -159,7 +159,13 @@ fn gap_fraction(lyrics: &crate::lyrics::Lyrics, index: Option<usize>, position_m
 /// spring, slower the farther the row is from the sung line, so a change
 /// of line ripples through the lyrics as a wave. Returns the offset to draw
 /// it at and whether it is still moving.
-fn row_spring(ctx: &egui::Context, id: egui::Id, top: f32, distance: usize, reach: f32) -> (f32, bool) {
+fn row_spring(
+    ctx: &egui::Context,
+    id: egui::Id,
+    top: f32,
+    distance: usize,
+    reach: f32,
+) -> (f32, bool, f32) {
     let dt = ctx.input(|input| input.stable_dt).clamp(0.0, 0.05);
     let (mut y, mut v) = ctx
         .data(|data| data.get_temp::<(f32, f32)>(id))
@@ -178,7 +184,7 @@ fn row_spring(ctx: &egui::Context, id: egui::Id, top: f32, distance: usize, reac
     }
     ctx.data_mut(|data| data.insert_temp(id, (y, v)));
     let offset = y - top;
-    (offset, offset.abs() > 0.2 || v.abs() > 2.0)
+    (offset, offset.abs() > 0.2 || v.abs() > 2.0, v)
 }
 
 /// One word of a line and when it is sung.
@@ -929,8 +935,8 @@ fn lines(
         // In full screen the rows follow on springs, in a staggered wave.
         // Each row assembles when its song opens: a cascade that rises into
         // place and fades in, one row after the one above it.
-        let (shift, enter) = if style.glow.is_some() && lyrics.synced {
-            let (offset, moving) = row_spring(
+        let (shift, enter, shine) = if style.glow.is_some() && lyrics.synced {
+            let (offset, moving, speed) = row_spring(
                 ui.ctx(),
                 style.id.with(("spring", index)),
                 ui.cursor().top(),
@@ -949,13 +955,20 @@ fn lines(
             let enter = smooth(((now - born) as f32 - index.min(14) as f32 * 0.07) / 0.8);
             drawn.animating |= moving || enter < 1.0;
             let rise = (1.0 - enter) * style.size * 1.2;
+            // A row that is moving shines and thins out as it goes by.
+            let shine = (speed.abs() / 400.0).min(0.6);
             (
                 TSTransform::from_translation(vec2(0.0, offset + rise)),
                 enter,
+                shine,
             )
         } else {
-            (TSTransform::IDENTITY, 1.0)
+            (TSTransform::IDENTITY, 1.0, 0.0)
         };
+        let glow_here = style.glow.map(|glow| Glow {
+            beat: (glow.beat + shine).min(1.0),
+            ..glow
+        });
         // A timed line with no words is the band playing on.
         if line.text.trim().is_empty() && lyrics.synced {
             let through = gap_fraction(lyrics, Some(index), now.position_ms);
@@ -1004,7 +1017,7 @@ fn lines(
             lit: if lyrics.synced { lit } else { 1.0 },
             sung: if lyrics.synced { sung } else { 1.0 },
             distance: if lyrics.synced { distance } else { 0 },
-            glow: style.glow.filter(|_| lyrics.synced),
+            glow: glow_here.filter(|_| lyrics.synced),
         };
         let sense = if lyrics.synced {
             Sense::click()
@@ -1020,7 +1033,7 @@ fn lines(
         });
         let response = ui
             .scope(|ui| {
-                ui.multiply_opacity(edge * enter);
+                ui.multiply_opacity(edge * enter * (1.0 - 0.3 * shine));
                 ui.with_visual_transform(shift, |ui| {
                     if words.is_empty() {
                         lyric_row(ui, &line.text, font.clone(), look, sense)
