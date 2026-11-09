@@ -944,6 +944,182 @@ fn write_cache(path: &Path, found: &Option<Lyrics>) {
     }
 }
 
+/// NetEase's song search and lyric endpoints, which need no login.
+const NETEASE_SEARCH: &str = "https://music.163.com/api/cloudsearch/pc";
+const NETEASE_LYRIC: &str = "https://music.163.com/api/song/lyric/v1";
+
+/// NetEase's word-timed lyrics, from `[line start,length](word start,length,0)word`
+/// lines. Lines that are not in that form, such as its metadata, are skipped.
+pub fn from_yrc(text: &str) -> Option<Lyrics> {
+    let lines: Vec<Line> = text
+        .lines()
+        .filter_map(|raw| {
+            let rest = raw.strip_prefix('[')?;
+            let (start, mut rest) = rest.split_once(']')?;
+            let at_ms: u32 = start.split(',').next()?.trim().parse().ok()?;
+            let mut words = Vec::new();
+            while let Some(stripped) = rest.strip_prefix('(') {
+                let (stamp, after) = stripped.split_once(')')?;
+                let mut parts = stamp.split(',');
+                let word_at: u32 = parts.next()?.trim().parse().ok()?;
+                let length: u32 = parts.next()?.trim().parse().ok()?;
+                let next = after.find('(').unwrap_or(after.len());
+                let word = &after[..next];
+                if !word.is_empty() {
+                    words.push(Word {
+                        at_ms: word_at,
+                        text: word.to_string(),
+                        end_ms: Some(word_at.saturating_add(length)),
+                    });
+                }
+                rest = &after[next..];
+            }
+            if words.is_empty() {
+                return None;
+            }
+            let text: String = words.iter().map(|word| word.text.as_str()).collect();
+            Some(Line {
+                at_ms: Some(at_ms),
+                text: text.trim().to_string(),
+                words,
+            })
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(Lyrics {
+        lines,
+        synced: true,
+        instrumental: false,
+    })
+}
+
+/// Letters and digits only, in lower case, so titles compare across
+/// punctuation and spacing.
+fn plain(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The NetEase song that is this track: the same title, a matching artist
+/// and a length within three seconds.
+fn netease_pick(json: &serde_json::Value, query: &Query) -> Option<u64> {
+    let title = plain(&clean_title(&query.title));
+    let artist = plain(&clean_artist(&query.artist));
+    json.get("result")?
+        .get("songs")?
+        .as_array()?
+        .iter()
+        .find_map(|song| {
+            let name = plain(song.get("name")?.as_str()?);
+            let length = song.get("dt")?.as_u64()?;
+            let artist_matches = song
+                .get("ar")?
+                .as_array()?
+                .iter()
+                .filter_map(|credit| credit.get("name")?.as_str())
+                .map(plain)
+                .any(|credited| {
+                    !credited.is_empty()
+                        && (artist.contains(&credited) || credited.contains(&artist))
+                });
+            let close = (length as i64 - query.duration_ms as i64).abs() <= 3_000;
+            if name == title && artist_matches && close {
+                song.get("id")?.as_u64()
+            } else {
+                None
+            }
+        })
+}
+
+/// NetEase's word-timed words for the track, cached like LRCLIB's answers.
+pub async fn netease(http: &reqwest::Client, cache_dir: &Path, query: &Query) -> Option<Lyrics> {
+    let path = cache_dir.join(format!("netease-{}.json", cache_key(query)));
+    if let Some(cached) = read_cache(&path) {
+        return cached;
+    }
+    let found = tokio::time::timeout(LOOKUP_TIMEOUT, netease_lookup(http, query))
+        .await
+        .ok()
+        .and_then(|result| result.ok())
+        .flatten();
+    write_cache(&path, &found);
+    found
+}
+
+async fn netease_lookup(http: &reqwest::Client, query: &Query) -> Result<Option<Lyrics>> {
+    let title = clean_title(&query.title);
+    let artist = clean_artist(&query.artist);
+    if title.is_empty() {
+        return Ok(None);
+    }
+    let search = format!("{artist} {title}");
+    let found: serde_json::Value = http
+        .get(NETEASE_SEARCH)
+        .query(&[("s", search.as_str()), ("type", "1"), ("limit", "5"), ("offset", "0")])
+        .header(reqwest::header::REFERER, "https://music.163.com")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let Some(id) = netease_pick(&found, query) else {
+        return Ok(None);
+    };
+    let body: serde_json::Value = http
+        .get(NETEASE_LYRIC)
+        .query(&[
+            ("id", id.to_string()),
+            ("cp", "false".to_string()),
+            ("tv", "0".to_string()),
+            ("lv", "0".to_string()),
+            ("rv", "0".to_string()),
+            ("kv", "0".to_string()),
+            ("yv", "1".to_string()),
+            ("ytv", "0".to_string()),
+            ("yrv", "0".to_string()),
+        ])
+        .header(reqwest::header::REFERER, "https://music.163.com")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let yrc = body
+        .get("yrc")
+        .and_then(|value| value.get("lyric"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    Ok(from_yrc(yrc))
+}
+
+#[cfg(test)]
+mod netease_tests {
+    use super::*;
+
+    #[test]
+    fn word_timed_yrc_lines_become_timed_words() {
+        let text = "{\"t\":0,\"c\":[]}\n[12580,3470](12580,250,0)难(12830,300,0)以(13130,370,0)忘 \n";
+        let lyrics = from_yrc(text).expect("one timed line");
+        assert!(lyrics.synced);
+        assert_eq!(lyrics.lines.len(), 1);
+        let line = &lyrics.lines[0];
+        assert_eq!(line.at_ms, Some(12580));
+        assert_eq!(line.text, "难以忘");
+        assert_eq!(line.words.len(), 3);
+        assert_eq!(line.words[1].at_ms, 12830);
+        assert_eq!(line.words[1].end_ms, Some(13130));
+    }
+
+    #[test]
+    fn plain_text_has_no_word_timing() {
+        assert!(from_yrc("[00:01.00] not word timed").is_none());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4792,6 +4792,20 @@ impl Worker {
                 Some(found) => Some(found),
                 None => spotify_lyrics(engine, &request.uri, &cache_dir).await,
             };
+            // Spotify's own lines are kept unless NetEase has the words.
+            let timed = |found: &crate::lyrics::Lyrics| {
+                found.lines.iter().any(|line| !line.words.is_empty())
+            };
+            let exact = match (exact, &http) {
+                (Some(found), _) if timed(&found) => Some(found),
+                (line_only, Ok(http)) => {
+                    match crate::lyrics::netease(http, &cache_dir, &request.query).await {
+                        Some(words) => Some(words),
+                        None => line_only,
+                    }
+                }
+                (line_only, Err(_)) => line_only,
+            };
             let result = match exact {
                 Some(found) => Ok(Some(found)),
                 None => match http {
