@@ -54,12 +54,13 @@ colon, or parentheses instead.
 When an issue reports slow or throttled Web API requests, slow playlist or
 library loading, rate limits, or proposes an export or cache workaround for
 those problems, first direct the reporter to
-https://spotifast.rocks/make-it-even-faster/ for the personal Client ID setup.
+https://spotifast.rocks/make-it-even-faster/ for registering Spotifast and
+getting a Client ID.
 Ask them to configure it and report what remains slow or throttled afterward;
-do this before asking for other diagnostic details. Make clear that the
-personal app gives supported Web API requests a separate quota while the
-shared app remains necessary for complete Spotify coverage. It cannot fix a
-librespot session or an `audio key 0 1` refusal.
+do this before asking for other diagnostic details. Make clear that a
+person who registers Spotifast gets a Client ID whose quota covers supported
+Web API requests. It cannot fix a librespot session or an `audio key 0 1`
+refusal.
 
 When reviewing a pull request, prioritize correctness, regressions, product
 fit, cross-platform behaviour, UI-thread blocking, credential exposure, and
@@ -67,6 +68,24 @@ unnecessary dependencies. Treat violations of the documented product
 boundaries as blockers. In particular, flag alternate sources for Spotify
 audio, DRM circumvention, embedded browser engines, telemetry, and hosted
 Spotifast services.
+
+Two contribution rules are blockers too. Review evidence never goes into the
+repository: screenshots, captures, comparison pages, or recordings, such as a
+new folder under `docs/assets/` that no page uses, belong in the pull request
+description or comments. Dependencies come only from crates.io or from
+repositories under `https://github.com/crmne/`: flag any `git` dependency,
+`[patch]` entry, or `Cargo.lock` source that points at a contributor's fork or
+anywhere else, and call out every added or changed git source, even a `crmne`
+one, because it needs the maintainer's explicit approval.
+
+New settings are a blocker as well. A pull request must not add a setting (a
+field in a `Settings` struct in `src/settings.rs`, a toggle, a slider, an
+option) unless the maintainer approved it in the linked issue first. Ask for a
+good default, a keyboard shortcut or a command instead, and ask the author to
+remove the setting. CI fails on a new `Settings` field until the maintainer
+adds the `setting-approved` label. When triaging a feature request that asks
+for a new option, leave that decision to the maintainer and do not suggest a
+setting yourself.
 
 Start every review by stating `User-visible UI impact: none` or by listing the
 visible changes. Treat changes to navigation, control placement, menu grouping,
@@ -79,8 +98,9 @@ from permission to assess code quality.
 
 Check that behavioural changes have focused tests and that user-visible
 settings, files, and network access are documented. For UI changes, ask for
-visual evidence when the pull request does not provide it. Do not spend review
-comments on formatting that rustfmt already enforces.
+visual evidence in the pull request description when it is missing, never as
+files committed to the repository. Do not spend review comments on formatting
+that rustfmt already enforces.
 
 CI passing is necessary but not proof that a change is correct. Give concrete,
 actionable findings tied to changed lines; avoid generic summaries and do not

@@ -11,10 +11,12 @@ use crate::model::{Action, Loadable, Page, RowContext};
 use crate::theme::{self, Icon};
 use crate::util;
 
-use super::collection::{Hero, hero, hero_images};
+use super::collection::{Hero, HeroArt, hero, hero_images, refresh_menu_item};
 use super::widgets;
 
 pub const EPISODE_ROW_HEIGHT: f32 = 128.0;
+/// The cover of an episode row.
+const EPISODE_ART: f32 = 96.0;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
     if !app.show_pages.contains_key(id) {
@@ -29,7 +31,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
     match &page.show {
         Loadable::Loaded(show) => {
             show_hero(app, ui, show, preview.as_deref());
-            show_actions(app, ui, show, page.episodes.items.first());
+            show_actions(
+                app,
+                ui,
+                show,
+                page.episodes.items.first(),
+                page.episodes.loading,
+            );
             if !show.description.is_empty() {
                 theme::section_title(ui, &palette, &gettext(locale, "About"));
                 ui.add_space(4.0);
@@ -49,46 +57,102 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
             theme::section_title(ui, &palette, &gettext(locale, "All episodes"));
             ui.add_space(6.0);
             let episodes = page.episodes.items.clone();
-            let show_image = pick_image(&show.images, 64).map(str::to_string);
-            widgets::virtual_rows(ui, episodes.len(), EPISODE_ROW_HEIGHT, |ui, index| {
-                episode_row(app, ui, &episodes[index], show_image.as_deref());
-            });
-            if page.episodes.loading {
-                widgets::loading_row(ui, &palette, app.locale);
+            let show_image = pick_image(&show.images, app.art_px(EPISODE_ART)).map(str::to_string);
+            if episodes.is_empty() && !app.network_reachable {
+                widgets::empty_state(
+                    ui,
+                    &palette,
+                    Icon::WifiOff,
+                    &gettext(locale, "You're offline"),
+                    &gettext(
+                        locale,
+                        "Spotifast will reconnect automatically when your connection returns.",
+                    ),
+                );
+            } else {
+                let render_episodes = |ui: &mut egui::Ui, app: &mut App| {
+                    widgets::virtual_rows(ui, episodes.len(), EPISODE_ROW_HEIGHT, |ui, index| {
+                        episode_row(app, ui, &episodes[index], show_image.as_deref());
+                    });
+                };
+                if !app.network_reachable {
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.multiply_opacity(0.55);
+                        render_episodes(ui, app);
+                    });
+                } else {
+                    render_episodes(ui, app);
+                }
+                if page.episodes.loading {
+                    widgets::loading_row(ui, &palette, app.locale);
+                }
+                if let Some(error) = &page.episodes.error {
+                    let error = error.clone();
+                    widgets::error_row(ui, app, &error, Some(Page::Show(id.to_string())));
+                }
+                widgets::load_more_when_near_end(
+                    ui,
+                    app,
+                    Page::Show(id.to_string()),
+                    page.episodes.can_load_more(),
+                );
             }
-            if let Some(error) = &page.episodes.error {
-                let error = error.clone();
-                widgets::error_row(ui, app, &error, Some(Page::Show(id.to_string())));
-            }
-            widgets::load_more_when_near_end(
-                ui,
-                app,
-                Page::Show(id.to_string()),
-                page.episodes.can_load_more(),
-            );
         }
         Loadable::Loading | Loadable::NotLoaded => {
             if let Some(show) = &preview {
                 show_hero(app, ui, show, None);
-                ui.add_enabled_ui(false, |ui| {
-                    show_actions(app, ui, show, None);
-                });
             } else {
                 ui.add_space(40.0);
             }
-            widgets::loading_row(ui, &palette, app.locale);
+            if !app.network_reachable {
+                widgets::empty_state(
+                    ui,
+                    &palette,
+                    Icon::WifiOff,
+                    &gettext(app.locale, "You're offline"),
+                    &gettext(
+                        app.locale,
+                        "Spotifast will reconnect automatically when your connection returns.",
+                    ),
+                );
+            } else {
+                if let Some(show) = &preview {
+                    ui.add_enabled_ui(false, |ui| {
+                        show_actions(app, ui, show, None, true);
+                    });
+                }
+                widgets::skeleton_rows(ui, &palette, app.locale, 6);
+            }
         }
         Loadable::Failed(error) => {
             let error = error.clone();
             if let Some(show) = &preview {
                 show_hero(app, ui, show, None);
-                ui.add_enabled_ui(false, |ui| {
-                    show_actions(app, ui, show, None);
-                });
             } else {
                 ui.add_space(40.0);
             }
-            widgets::error_row(ui, app, &error, Some(Page::Show(id.to_string())));
+            if !app.network_reachable
+                || error.contains("network error")
+                || error.contains("Network connection error")
+            {
+                widgets::empty_state(
+                    ui,
+                    &palette,
+                    Icon::WifiOff,
+                    &gettext(app.locale, "You're offline"),
+                    &gettext(
+                        app.locale,
+                        "Spotifast will reconnect automatically when your connection returns.",
+                    ),
+                );
+            } else {
+                if let Some(show) = &preview {
+                    ui.add_enabled_ui(false, |ui| {
+                        show_actions(app, ui, show, None, true);
+                    });
+                }
+                widgets::error_row(ui, app, &error, Some(Page::Show(id.to_string())));
+            }
         }
     }
     app.show_pages.insert(id.to_string(), page);
@@ -114,6 +178,7 @@ fn show_hero(app: &mut App, ui: &mut egui::Ui, show: &Show, preview: Option<&Sho
         &show.images,
         preview.map(|show| show.images.as_slice()),
         false,
+        HeroArt::of(app),
     );
     hero(
         app,
@@ -125,12 +190,20 @@ fn show_hero(app: &mut App, ui: &mut egui::Ui, show: &Show, preview: Option<&Sho
             title: &show.name,
             description: None,
             byline,
+            byline_tooltip: None,
+            avatar: None,
             round: false,
         },
     );
 }
 
-fn show_actions(app: &mut App, ui: &mut egui::Ui, show: &Show, latest: Option<&Episode>) {
+fn show_actions(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    show: &Show,
+    latest: Option<&Episode>,
+    refreshing: bool,
+) {
     let palette = app.palette;
     let locale = app.locale;
     let saved = app.is_saved(&show.uri).unwrap_or(false);
@@ -188,7 +261,13 @@ fn show_actions(app: &mut App, ui: &mut egui::Ui, show: &Show, latest: Option<&E
         );
         egui::Popup::menu(&more)
             .frame(widgets::menu_frame(&palette))
-            .show(|ui| widgets::context_menu_items(ui, app, &show.uri, &show.name, None));
+            .show(|ui| {
+                widgets::context_menu_items(ui, app, &show.uri, &show.name, None);
+                if app.network_reachable {
+                    widgets::menu_separator(ui, &palette);
+                    refresh_menu_item(app, ui, &Page::Show(show.id.clone()), refreshing);
+                }
+            });
     });
     ui.add_space(16.0);
 }
@@ -220,8 +299,8 @@ pub fn episode_row(
         );
     }
     let inner = rect.shrink2(vec2(12.0, 12.0));
-    let cover_rect = Rect::from_min_size(inner.min, Vec2::splat(96.0));
-    let image = pick_image(&episode.images, 64).or(fallback_image);
+    let cover_rect = Rect::from_min_size(inner.min, Vec2::splat(EPISODE_ART));
+    let image = pick_image(&episode.images, app.art_px(EPISODE_ART)).or(fallback_image);
     widgets::paint_cover(
         ui,
         &palette,
@@ -402,4 +481,120 @@ pub fn episode_row(
         });
     }
     let _ = RowContext::Uris(Arc::from([]));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        let root = std::env::temp_dir().join(format!(
+            "spotifast-show-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        App::new(
+            &crate::backend::Waker::default(),
+            crate::paths::AppDirs {
+                config: root.join("config"),
+                state: root.join("state"),
+                cache: root.join("cache"),
+            },
+            crate::settings::Settings::default(),
+            crate::app::AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+                autostart: false,
+            },
+        )
+    }
+
+    /// A podcast's More menu offers the playlist page's Refresh, which
+    /// reloads the podcast, and reads Refreshing… while it loads.
+    #[test]
+    fn podcast_more_menu_refreshes_the_podcast() {
+        let show = Show {
+            id: "sh1".into(),
+            uri: "spotify:show:sh1".into(),
+            name: "Rework".into(),
+            ..Show::default()
+        };
+        for refreshing in [false, true] {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            theme::install(&ctx);
+            let mut app = test_app();
+            let mut frame = |events| {
+                app.actions.clear();
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            vec2(800.0, 520.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| show_actions(&mut app, ui, &show, None, refreshing),
+                );
+                output.textures_delta.clear();
+                (
+                    output.platform_output.accesskit_update.unwrap(),
+                    std::mem::take(&mut app.actions),
+                )
+            };
+            let locate = |tree: &egui::accesskit::TreeUpdate, label: &str| {
+                let (_, node) = tree
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| n.label() == Some(label))
+                    .unwrap_or_else(|| panic!("missing {label}"));
+                let b = node.bounds().unwrap();
+                (
+                    node.is_disabled(),
+                    pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32),
+                )
+            };
+            let click = |pos| {
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]
+            };
+            frame(vec![]);
+            let (closed, _) = frame(vec![]);
+            let (_, more) = locate(&closed, "More");
+            frame(click(more));
+            let (open, _) = frame(vec![]);
+            if refreshing {
+                let (disabled, _) = locate(&open, "Refreshing…");
+                assert!(disabled, "no second refresh while one loads");
+                continue;
+            }
+            let (disabled, refresh) = locate(&open, "Refresh");
+            assert!(!disabled);
+            let (_, actions) = frame(click(refresh));
+            assert!(
+                actions
+                    .iter()
+                    .any(|action| matches!(action, Action::Reload(Page::Show(id)) if id == "sh1")),
+                "Refresh reloads the podcast: {actions:?}"
+            );
+        }
+    }
 }

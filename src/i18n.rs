@@ -33,12 +33,16 @@ pub enum Locale {
     Italian,
     #[value(name = "ja")]
     Japanese,
+    #[value(name = "ko")]
+    Korean,
     #[value(name = "zh-Hans")]
     ChineseSimplified,
     #[value(name = "zh-Hant")]
     ChineseTraditional,
     #[value(name = "tr")]
     Turkish,
+    #[value(name = "uk")]
+    Ukrainian,
 }
 
 impl fastframe_i18n::Locale for Locale {
@@ -56,9 +60,11 @@ impl fastframe_i18n::Locale for Locale {
             Self::Russian => Some(&ru::Translator),
             Self::Italian => Some(&it::Translator),
             Self::Japanese => Some(&ja::Translator),
+            Self::Korean => Some(&ko::Translator),
             Self::ChineseSimplified => Some(&zh_hans::Translator),
             Self::ChineseTraditional => Some(&zh_hant::Translator),
             Self::Turkish => Some(&tr::Translator),
+            Self::Ukrainian => Some(&uk::Translator),
         }
     }
 }
@@ -80,9 +86,11 @@ impl Locale {
             Self::Russian => "ru",
             Self::Italian => "it",
             Self::Japanese => "ja",
+            Self::Korean => "ko",
             Self::ChineseSimplified => "zh-Hans",
             Self::ChineseTraditional => "zh-Hant",
             Self::Turkish => "tr",
+            Self::Ukrainian => "uk",
         }
     }
 
@@ -109,9 +117,11 @@ impl Locale {
             Self::Russian => "Русский",
             Self::Italian => "Italiano",
             Self::Japanese => "日本語",
+            Self::Korean => "한국어",
             Self::ChineseSimplified => "简体中文",
             Self::ChineseTraditional => "繁體中文",
             Self::Turkish => "Türkçe",
+            Self::Ukrainian => "Українська",
         }
     }
 
@@ -148,7 +158,9 @@ impl Locale {
             "ru" => Self::Russian,
             "it" => Self::Italian,
             "ja" => Self::Japanese,
+            "ko" => Self::Korean,
             "tr" => Self::Turkish,
+            "uk" => Self::Ukrainian,
             // Portuguese outside Brazil follows the European standard. A bare
             // "pt" goes to Brazil, where most Portuguese speakers live.
             "pt" => match region {
@@ -241,7 +253,9 @@ pub const LOCALES: &[Locale] = &[
     Locale::Swedish,
     Locale::Turkish,
     Locale::Russian,
+    Locale::Ukrainian,
     Locale::Japanese,
+    Locale::Korean,
     Locale::ChineseSimplified,
     Locale::ChineseTraditional,
 ];
@@ -278,9 +292,15 @@ mod tests {
             ("ru_UA.UTF-8", Locale::Russian),
             ("it-CH", Locale::Italian),
             ("ja-JP", Locale::Japanese),
+            ("ko", Locale::Korean),
+            ("ko-KR", Locale::Korean),
+            ("ko_KR.UTF-8", Locale::Korean),
             ("tr", Locale::Turkish),
             ("tr-TR", Locale::Turkish),
             ("tr_TR.UTF-8", Locale::Turkish),
+            ("uk", Locale::Ukrainian),
+            ("uk-UA", Locale::Ukrainian),
+            ("uk_UA.UTF-8", Locale::Ukrainian),
             ("pt-BR", Locale::PortugueseBrazil),
             ("pt_BR.UTF-8", Locale::PortugueseBrazil),
             ("pt", Locale::PortugueseBrazil),
@@ -306,7 +326,7 @@ mod tests {
         ] {
             assert_eq!(Locale::from_language_tag(tag), Some(expected), "{tag}");
         }
-        for tag in ["nb-NO", "ko-KR", "ar", "C", "POSIX", "", "-", "und"] {
+        for tag in ["nb-NO", "fi-FI", "ar", "C", "POSIX", "", "-", "und"] {
             assert_eq!(Locale::from_language_tag(tag), None, "{tag}");
         }
     }
@@ -319,7 +339,8 @@ mod tests {
         };
         assert_eq!(preferred(&["nb-NO", "de-DE", "en-US"]), Locale::German);
         assert_eq!(preferred(&["es-MX", "en-US"]), Locale::Spanish);
-        assert_eq!(preferred(&["ko-KR"]), Locale::English);
+        assert_eq!(preferred(&["fi-FI"]), Locale::English);
+        assert_eq!(preferred(&["nb-NO", "ko-KR"]), Locale::Korean);
         assert_eq!(preferred(&[]), Locale::English);
     }
 
@@ -338,6 +359,7 @@ mod tests {
         assert_eq!(Locale::from_tag("de"), Some(Locale::German));
         assert_eq!(Locale::from_tag("en-US"), Some(Locale::English));
         assert_eq!(Locale::from_tag("tr"), Some(Locale::Turkish));
+        assert_eq!(Locale::from_tag("uk"), Some(Locale::Ukrainian));
         assert_eq!(Locale::from_tag("klingon"), None);
     }
 
@@ -347,6 +369,7 @@ mod tests {
         let context = "lyrics";
         assert_eq!(pgettext(Locale::German, context, source), "Folgen");
         assert_eq!(pgettext(Locale::Japanese, context, source), "追従");
+        assert_eq!(pgettext(Locale::Korean, context, source), "따라가기");
         assert_eq!(pgettext(Locale::English, context, source), source);
         assert_eq!(pgettext(Locale::German, "no such context", source), source);
         assert_eq!(gettext(Locale::German, source), source);
@@ -373,6 +396,8 @@ mod tests {
     fn short_counts_are_localized_without_parsing_complete_phrases() {
         assert_eq!(Locale::German.song_count(2), "2 Songs");
         assert_eq!(Locale::Japanese.song_count(2), "2曲");
+        assert_eq!(Locale::Korean.song_count(2), "2곡");
+        assert_eq!(Locale::Korean.playlist_count(1), "플레이리스트 1개");
         assert_eq!(Locale::Turkish.song_count(2), "2 şarkı");
         assert_eq!(Locale::German.playlist_count(1), "1 Playlist");
         assert_eq!(Locale::German.playlist_count(2), "2 Playlists");
@@ -380,6 +405,10 @@ mod tests {
         assert_eq!(Locale::Russian.playlist_count(5), "5 плейлистов");
         assert_eq!(Locale::Turkish.playlist_count(1), "1 çalma listesi");
         assert_eq!(Locale::Turkish.playlist_count(2), "2 çalma listesi");
+        assert_eq!(Locale::Ukrainian.song_count(2), "2 пісні");
+        assert_eq!(Locale::Ukrainian.playlist_count(1), "1 плейліст");
+        assert_eq!(Locale::Ukrainian.playlist_count(2), "2 плейлісти");
+        assert_eq!(Locale::Ukrainian.playlist_count(5), "5 плейлістів");
         for (locale, count, expected) in [
             (Locale::English, 1, "Folder • 1 playlist"),
             (Locale::English, 2, "Folder • 2 playlists"),
@@ -393,8 +422,13 @@ mod tests {
             (Locale::Russian, 5, "Папка • 5 плейлистов"),
             (Locale::Japanese, 1, "フォルダ • 1件のプレイリスト"),
             (Locale::Japanese, 4, "フォルダ • 4件のプレイリスト"),
+            (Locale::Korean, 1, "폴더 • 플레이리스트 1개"),
+            (Locale::Korean, 4, "폴더 • 플레이리스트 4개"),
             (Locale::Turkish, 1, "Klasör • 1 çalma listesi"),
             (Locale::Turkish, 2, "Klasör • 2 çalma listesi"),
+            (Locale::Ukrainian, 1, "Папка • 1 плейліст"),
+            (Locale::Ukrainian, 3, "Папка • 3 плейлісти"),
+            (Locale::Ukrainian, 5, "Папка • 5 плейлістів"),
         ] {
             assert_eq!(
                 locale.folder_playlist_count(count),
@@ -421,6 +455,14 @@ mod tests {
         assert_eq!(
             Locale::Turkish.folder_state_label("Yolculuk", false),
             "Yolculuk, klasör, genişletilmiş"
+        );
+        assert_eq!(
+            Locale::Ukrainian.folder_state_label("Подорожі", true),
+            "Подорожі, папка, згорнута"
+        );
+        assert_eq!(
+            Locale::Ukrainian.folder_state_label("Подорожі", false),
+            "Подорожі, папка, розгорнута"
         );
     }
 
@@ -449,11 +491,21 @@ mod tests {
             (Locale::Russian, 112, "Плейлист • 112 треков"),
             (Locale::Japanese, 0, "プレイリスト • 0曲"),
             (Locale::Japanese, 2, "プレイリスト • 2曲"),
+            (Locale::Korean, 0, "플레이리스트 • 0곡"),
+            (Locale::Korean, 2, "플레이리스트 • 2곡"),
             (Locale::ChineseSimplified, 2, "歌单 • 2 首歌曲"),
             (Locale::ChineseTraditional, 2, "播放清單 • 2 首歌曲"),
             (Locale::Turkish, 0, "Çalma listesi • 0 şarkı"),
             (Locale::Turkish, 1, "Çalma listesi • 1 şarkı"),
             (Locale::Turkish, 2, "Çalma listesi • 2 şarkı"),
+            (Locale::Ukrainian, 0, "Плейліст • 0 пісень"),
+            (Locale::Ukrainian, 1, "Плейліст • 1 пісня"),
+            (Locale::Ukrainian, 2, "Плейліст • 2 пісні"),
+            (Locale::Ukrainian, 5, "Плейліст • 5 пісень"),
+            (Locale::Ukrainian, 11, "Плейліст • 11 пісень"),
+            (Locale::Ukrainian, 21, "Плейліст • 21 пісня"),
+            (Locale::Ukrainian, 22, "Плейліст • 22 пісні"),
+            (Locale::Ukrainian, 112, "Плейліст • 112 пісень"),
         ] {
             assert_eq!(locale.liked_song_count(count), expected);
         }

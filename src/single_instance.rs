@@ -74,6 +74,12 @@ pub enum ControlCommand {
     ToggleSaved,
     /// Play a `spotify:` URI: a track, album, playlist, artist, or show.
     PlayUri(String),
+    /// Search Spotify for a track, album, artist, or playlist, and play the
+    /// best match.
+    PlaySearch {
+        kind: String,
+        query: String,
+    },
     /// Open the page for a Spotify link the desktop or another launch
     /// handed over, and bring the window forward.
     OpenLink(String),
@@ -132,18 +138,24 @@ pub const NO_DEVICES: &str = "[]";
 /// runtime directory on Linux (the app's own inside Flatpak), the user's
 /// private temporary directory on macOS, where a socket path under
 /// Application Support can outgrow the 104 bytes macOS allows with a long
-/// user name, and beside Spotifast's state on Windows.
+/// user name, and beside Spotifast's per-user state on Windows.
+///
+/// A portable Windows copy keeps its settings in its own folder (#703), so
+/// it gets a slot of its own for that folder, kept in the user's profile
+/// rather than the portable folder, which may sit on a drive any user can
+/// read: it never hands a launch to the installed copy or to a portable
+/// copy elsewhere, and the `spotifast` command it runs reaches it.
 fn slot() -> fastframe_instance::Slot {
     #[cfg(not(windows))]
-    {
-        fastframe_instance::Slot::new(NAME)
-    }
+    let slot = fastframe_instance::Slot::new(NAME);
     #[cfg(windows)]
-    {
-        fastframe_instance::Slot::at(
-            crate::paths::AppDirs::discover().state.join("instance"),
-            NAME,
-        )
+    let slot = fastframe_instance::Slot::at(
+        crate::paths::AppDirs::installed().state.join("instance"),
+        NAME,
+    );
+    match crate::paths::AppDirs::instance_scope() {
+        Some(scope) => slot.scoped(&scope),
+        None => slot,
     }
 }
 
@@ -185,21 +197,31 @@ fn reply(line: &str) -> std::io::Result<Reply> {
 
 /// Claims the running-instance role, or hands `link` (a canonical
 /// `spotify:` URI, see [`crate::link::parse`]) to the instance that has it
-/// and asks that one to come forward.
-pub fn acquire(waker: &crate::backend::Waker, link: Option<&str>) -> Outcome {
-    claim(&slot(), waker, link)
+/// and asks that one to come forward. A `hidden` start leaves the running
+/// one where it is.
+pub fn acquire(waker: &crate::backend::Waker, link: Option<&str>, hidden: bool) -> Outcome {
+    claim(&slot(), waker, link, hidden)
+}
+
+/// What a launch asks of the instance already running: open its link, stay
+/// where it is for a hidden start (a read it answers without coming
+/// forward), or show its window.
+fn launch_request(link: Option<&str>, hidden: bool) -> String {
+    match link {
+        Some(uri) => format!("open-link {uri}"),
+        None if hidden => "nowplaying".to_owned(),
+        None => "show".to_owned(),
+    }
 }
 
 fn claim(
     slot: &fastframe_instance::Slot,
     waker: &crate::backend::Waker,
     link: Option<&str>,
+    hidden: bool,
 ) -> Outcome {
     let mut guard = Guard::unguarded();
-    let request = match link {
-        Some(uri) => format!("open-link {uri}"),
-        None => "show".to_owned(),
-    };
+    let request = launch_request(link, hidden);
     let handler = handler(
         std::sync::Arc::clone(&guard.commands),
         std::sync::Arc::clone(&guard.now_playing),
@@ -310,6 +332,16 @@ fn parse(line: &str) -> Option<Request> {
         }
         ("save-toggle", None) => ControlCommand::ToggleSaved,
         ("play-uri", Some(uri)) => ControlCommand::PlayUri(spotify_uri(uri)?),
+        ("play-search", Some(argument)) => {
+            let (kind, query) = argument.split_once(' ')?;
+            if !matches!(kind, "track" | "album" | "artist" | "playlist") {
+                return None;
+            }
+            ControlCommand::PlaySearch {
+                kind: kind.to_owned(),
+                query: search_text(query)?,
+            }
+        }
         ("open-link", Some(link)) => ControlCommand::OpenLink(crate::link::parse(link)?),
         ("transfer", Some(id)) => ControlCommand::Transfer(device_id(id)?),
         ("nowplaying", None) => return Some(Request::NowPlaying),
@@ -327,6 +359,15 @@ fn spotify_uri(text: &str) -> Option<String> {
         && text
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.' | '%' | '+'));
+    shaped.then(|| text.to_owned())
+}
+
+/// Words to search for, checked like the other free-text arguments: not
+/// empty, not long, and without control characters.
+fn search_text(text: &str) -> Option<String> {
+    let text = text.trim();
+    let shaped =
+        !text.is_empty() && text.chars().count() <= 200 && !text.chars().any(char::is_control);
     shaped.then(|| text.to_owned())
 }
 
@@ -424,6 +465,31 @@ mod tests {
     }
 
     #[test]
+    fn play_search_carries_its_kind_and_words() {
+        assert_eq!(
+            command("play-search track danza rota soda stereo"),
+            Some(ControlCommand::PlaySearch {
+                kind: "track".into(),
+                query: "danza rota soda stereo".into(),
+            })
+        );
+        assert_eq!(
+            command("play-search artist Soda Stereo"),
+            Some(ControlCommand::PlaySearch {
+                kind: "artist".into(),
+                query: "Soda Stereo".into(),
+            })
+        );
+        assert_eq!(command("play-search track"), None);
+        assert_eq!(command("play-search song danza rota"), None);
+        assert_eq!(command("play-search track \u{7}bell"), None);
+        assert_eq!(
+            command(&format!("play-search track {}", "a".repeat(201))),
+            None
+        );
+    }
+
+    #[test]
     fn rejects_lines_that_are_not_ours() {
         assert!(parse("GET / HTTP/1.1").is_none());
         assert!(parse("frobnicate").is_none());
@@ -470,12 +536,17 @@ mod tests {
         // #given
         let (slot, dir) = test_slot("second-launch");
         let waker = crate::backend::Waker::default();
-        let Outcome::Only(first) = claim(&slot, &waker, None) else {
+        let Outcome::Only(first) = claim(&slot, &waker, None, false) else {
             panic!("the first launch runs");
         };
 
         // #when
-        let second = claim(&slot, &waker, Some("spotify:album:1DFixLWuPkv3KT3TnV35m3"));
+        let second = claim(
+            &slot,
+            &waker,
+            Some("spotify:album:1DFixLWuPkv3KT3TnV35m3"),
+            false,
+        );
 
         // #then
         assert!(matches!(second, Outcome::Surfaced));
@@ -489,12 +560,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A start at login in the tray finds Spotifast already running (the
+    /// person opened it first) and ends without bringing it forward.
+    #[test]
+    fn a_hidden_second_launch_leaves_the_first_where_it_is() {
+        // #given
+        let (slot, dir) = test_slot("hidden-launch");
+        let waker = crate::backend::Waker::default();
+        let Outcome::Only(first) = claim(&slot, &waker, None, false) else {
+            panic!("the first launch runs");
+        };
+
+        // #when
+        let second = claim(&slot, &waker, None, true);
+
+        // #then
+        assert!(matches!(second, Outcome::Surfaced));
+        assert!(first.commands.lock().expect("the queue").is_empty());
+        drop(first);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_launch_asks_for_its_link_the_window_or_nothing() {
+        assert_eq!(
+            launch_request(Some("spotify:track:1"), true),
+            "open-link spotify:track:1",
+            "a link is to be seen, even from a hidden start"
+        );
+        assert_eq!(launch_request(None, false), "show");
+        assert_eq!(launch_request(None, true), "nowplaying");
+    }
+
     /// Commands reach the queue and reads return the published snapshots.
     #[test]
     fn a_client_reaches_the_command_queue_and_the_snapshot() {
         // #given
         let (slot, dir) = test_slot("round-trip");
-        let Outcome::Only(guard) = claim(&slot, &crate::backend::Waker::default(), None) else {
+        let Outcome::Only(guard) = claim(&slot, &crate::backend::Waker::default(), None, false)
+        else {
             panic!("the slot is free");
         };
         *guard.now_playing.lock().expect("the snapshot") = "playing\tGo\tThe Band".to_owned();

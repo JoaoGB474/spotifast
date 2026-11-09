@@ -19,8 +19,9 @@ use librespot_playback::{NUM_CHANNELS, SAMPLE_RATE};
 /// Half a second of audio.
 const KEPT: usize = SAMPLE_RATE as usize / 2;
 /// How far behind the newest sample the visualiser looks, so that it shows
-/// what the speaker is playing rather than what the sink has queued.
-pub const LAG: usize = SAMPLE_RATE as usize * 3 / 20;
+/// what the speaker is playing rather than what the sink has queued: the
+/// sink keeps 180 to 200 ms queued, and the device holds a little more.
+pub const LAG: usize = SAMPLE_RATE as usize / 5;
 /// Samples that go into one spectrum.
 pub const FFT_SAMPLES: usize = 512;
 const SPECTRUM_BINS: usize = FFT_SAMPLES / 2;
@@ -41,6 +42,8 @@ const PEAK_FALLOFF: f32 = 1.1;
 /// changed how quickly the bars fell; a frame that comes sooner than
 /// this shows the bars where they were.
 pub const STEP: Duration = Duration::from_micros(16_667);
+/// The most steps one frame catches up on.
+const CATCH_UP: u128 = 2;
 /// Converts the tap's channel mean to Winamp's channel sum.
 const CHANNEL_SUM: f32 = 2.0;
 /// Winamp's own scale on every magnitude.
@@ -55,6 +58,10 @@ pub struct AudioTap {
     /// The ring the MilkDrop child reads, attached while its window is open.
     #[cfg(feature = "milkdrop")]
     shm: Mutex<Option<std::sync::Arc<crate::milkdrop::shm::Ring>>>,
+    /// The ring of the child drawing for a skin's pane, which can run beside
+    /// the window's.
+    #[cfg(feature = "milkdrop")]
+    pane_shm: Mutex<Option<std::sync::Arc<crate::milkdrop::shm::Ring>>>,
 }
 
 impl std::fmt::Debug for AudioTap {
@@ -69,6 +76,8 @@ impl Default for AudioTap {
             samples: Mutex::new(VecDeque::with_capacity(KEPT)),
             #[cfg(feature = "milkdrop")]
             shm: Mutex::new(None),
+            #[cfg(feature = "milkdrop")]
+            pane_shm: Mutex::new(None),
         }
     }
 }
@@ -84,34 +93,58 @@ impl AudioTap {
         *self.shm.lock().unwrap_or_else(|p| p.into_inner()) = ring;
     }
 
+    /// Connects the tap to the pane's ring. `None` detaches it.
+    #[cfg(feature = "milkdrop")]
+    pub fn set_pane_shm(&self, ring: Option<std::sync::Arc<crate::milkdrop::shm::Ring>>) {
+        *self.pane_shm.lock().unwrap_or_else(|p| p.into_inner()) = ring;
+    }
+
     /// Adds scaled stereo samples to the mono analyser buffer and, when
-    /// attached, MilkDrop's stereo shared-memory ring.
+    /// attached, MilkDrop's stereo shared-memory rings.
     pub fn push(&self, interleaved: &[f64], gain: f32) {
         let mut samples = self.samples.lock().unwrap_or_else(|p| p.into_inner());
-        let (frames, _) = interleaved.as_chunks::<{ NUM_CHANNELS as usize }>();
+        record_mono(&mut samples, interleaved, gain);
+        drop(samples);
         #[cfg(feature = "milkdrop")]
-        let shm = self.shm.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        #[cfg(feature = "milkdrop")]
-        let mut stereo: Vec<f32> = if shm.is_some() {
-            Vec::with_capacity(frames.len() * 2)
-        } else {
-            Vec::new()
-        };
-        for frame in frames {
-            let mono = frame.iter().sum::<f64>() as f32 / frame.len() as f32 * gain;
-            if samples.len() == KEPT {
-                samples.pop_front();
-            }
-            samples.push_back(mono);
-            #[cfg(feature = "milkdrop")]
-            if shm.is_some() {
-                stereo.push(frame[0] as f32 * gain);
-                stereo.push(frame[1] as f32 * gain);
+        {
+            let rings = [
+                self.shm.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+                self.pane_shm
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            ];
+            for ring in rings.iter().flatten() {
+                record_stereo(ring, interleaved, gain);
             }
         }
+    }
+
+    /// `push` for a realtime thread: no allocation, and nothing it would
+    /// have to wait for. A window being read costs the picture this block,
+    /// which is better than the sound waiting for the picture.
+    #[cfg(target_os = "linux")]
+    pub fn try_push(&self, interleaved: &[f64], gain: f32) {
+        if let Ok(mut samples) = self.samples.try_lock() {
+            record_mono(&mut samples, interleaved, gain);
+        }
+        // Each lock is kept through the write: a clone of the ring here
+        // could turn out to be the last, and free it on this thread.
         #[cfg(feature = "milkdrop")]
-        if let Some(ring) = &shm {
-            ring.push(&stereo);
+        for slot in [&self.shm, &self.pane_shm] {
+            if let Ok(ring) = slot.try_lock()
+                && let Some(ring) = ring.as_ref()
+            {
+                record_stereo(ring, interleaved, gain);
+            }
+        }
+    }
+
+    /// `clear` for a realtime thread, when it can have the lock.
+    #[cfg(target_os = "linux")]
+    pub fn try_clear(&self) {
+        if let Ok(mut samples) = self.samples.try_lock() {
+            samples.clear();
         }
     }
 
@@ -140,9 +173,35 @@ impl AudioTap {
     }
 }
 
+fn record_mono(samples: &mut VecDeque<f32>, interleaved: &[f64], gain: f32) {
+    for frame in interleaved.as_chunks::<{ NUM_CHANNELS as usize }>().0 {
+        let mono = frame.iter().sum::<f64>() as f32 / frame.len() as f32 * gain;
+        if samples.len() == KEPT {
+            samples.pop_front();
+        }
+        samples.push_back(mono);
+    }
+}
+
+/// Writes stereo to a shared-memory ring, in pieces of a fixed size on the
+/// stack so that it allocates nothing.
+#[cfg(feature = "milkdrop")]
+fn record_stereo(ring: &crate::milkdrop::shm::Ring, interleaved: &[f64], gain: f32) {
+    const FRAMES: usize = 256;
+    let mut stereo = [0.0f32; FRAMES * 2];
+    let (frames, _) = interleaved.as_chunks::<{ NUM_CHANNELS as usize }>();
+    for piece in frames.chunks(FRAMES) {
+        for (out, frame) in stereo.as_chunks_mut::<2>().0.iter_mut().zip(piece) {
+            *out = [frame[0] as f32 * gain, frame[1] as f32 * gain];
+        }
+        ring.push(&stereo[..piece.len() * 2]);
+    }
+}
+
 /// Runs the equalizer and taps the signal before passing it to the real sink.
 pub struct Tapped {
     inner: Box<dyn Sink>,
+    control: Arc<crate::sink::AudioControl>,
     tap: Arc<AudioTap>,
     eq: crate::eq::Processor,
     /// Player volume, used to calculate the limiter ceiling.
@@ -160,6 +219,7 @@ pub struct Tapped {
 impl Tapped {
     pub fn new(
         inner: Box<dyn Sink>,
+        control: Arc<crate::sink::AudioControl>,
         tap: Arc<AudioTap>,
         volume: Box<dyn VolumeGetter + Send>,
         applies_volume: bool,
@@ -168,6 +228,7 @@ impl Tapped {
     ) -> Self {
         Self {
             inner,
+            control,
             tap,
             eq: crate::eq::Processor::new(eq),
             volume,
@@ -204,6 +265,11 @@ impl Sink for Tapped {
     }
 
     fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()> {
+        if self.control.take_processing_reset() {
+            self.eq.reset();
+            self.limiter = crate::limiter::Limiter::new(f64::from(SAMPLE_RATE));
+            self.tap.clear();
+        }
         let packet = match packet {
             AudioPacket::Samples(mut samples) => {
                 self.eq.process(&mut samples);
@@ -368,13 +434,17 @@ impl Analyser {
     /// One frame: the spectrum of `samples` (512 of them, mono, -1 to 1)
     /// moves the bars, and the bars are returned.
     pub fn step(&mut self, samples: &[f32], now: Instant) -> [Bar; BARS] {
-        // Keep the step's own beat when frames come a little early or late,
-        // and never owe more than one step after a long gap.
+        // Keep the step's own beat when frames come a little early or late.
+        // Frames at half rate (a window out of focus, or saving energy) owe
+        // two steps, so the bars fall as fast as at full rate; after a long
+        // gap no more than that is owed.
         let due = self.last_step.map_or(now, |last| last + STEP);
         if now + Duration::from_millis(1) < due {
             return self.bars;
         }
-        self.last_step = Some(due.max(now - STEP));
+        let behind = now.saturating_duration_since(due).as_nanos() / STEP.as_nanos();
+        let owed = (1 + behind).min(CATCH_UP) as u32;
+        self.last_step = Some((due + STEP * (owed - 1)).max(now - STEP));
         self.wave.fill(0.0);
         for (slot, sample) in self.wave.iter_mut().zip(samples.iter()) {
             *slot = sample * CHANNEL_SUM;
@@ -389,22 +459,26 @@ impl Analyser {
                     / 4.0;
             // Winamp kept the target as a whole number of rows.
             let target = sound.min(MAX_HEIGHT).trunc();
-            let falloff = &mut self.falloff[bar];
-            *falloff -= FALLOFF;
-            if *falloff <= target {
-                *falloff = target;
+            let mut peak_row = 0;
+            for _ in 0..owed {
+                let falloff = &mut self.falloff[bar];
+                *falloff -= FALLOFF;
+                if *falloff <= target {
+                    *falloff = target;
+                }
+                let peak = &mut self.peaks[bar];
+                if *peak <= (*falloff * 256.0).round() as i32 {
+                    *peak = (*falloff * 256.0) as i32;
+                    self.peak_speed[bar] = 3.0;
+                }
+                peak_row = *peak / 256;
+                *peak -= self.peak_speed[bar].round() as i32;
+                self.peak_speed[bar] *= PEAK_FALLOFF;
+                if *peak <= 0 {
+                    *peak = 0;
+                }
             }
-            let peak = &mut self.peaks[bar];
-            if *peak <= (*falloff * 256.0).round() as i32 {
-                *peak = (*falloff * 256.0) as i32;
-                self.peak_speed[bar] = 3.0;
-            }
-            let peak_row = *peak / 256;
-            *peak -= self.peak_speed[bar].round() as i32;
-            self.peak_speed[bar] *= PEAK_FALLOFF;
-            if *peak <= 0 {
-                *peak = 0;
-            }
+            let falloff = self.falloff[bar];
             slot.height = falloff.round() as u8;
             slot.peak = (peak_row >= 1).then_some((peak_row + 1) as u8);
         }
@@ -639,6 +713,108 @@ pub const SCOPE_STEP: usize = 7;
 mod tests {
     use super::*;
 
+    struct RecordedSink(Arc<Mutex<Vec<f64>>>);
+
+    impl Sink for RecordedSink {
+        fn start(&mut self) -> SinkResult<()> {
+            Ok(())
+        }
+
+        fn stop(&mut self) -> SinkResult<()> {
+            Ok(())
+        }
+
+        fn write(&mut self, packet: AudioPacket, _: &mut Converter) -> SinkResult<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .extend_from_slice(packet.samples().unwrap());
+            Ok(())
+        }
+    }
+
+    fn recorded_tap(
+        control: Arc<crate::sink::AudioControl>,
+        eq: crate::eq::SharedEq,
+    ) -> (Tapped, Arc<Mutex<Vec<f64>>>) {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let tapped = Tapped::new(
+            Box::new(RecordedSink(Arc::clone(&recorded))),
+            control,
+            AudioTap::new(),
+            Box::new(librespot_playback::mixer::NoOpVolume),
+            false,
+            eq,
+            Arc::new(std::sync::atomic::AtomicU64::new(1.0f64.to_bits())),
+        );
+        (tapped, recorded)
+    }
+
+    fn write_level(tapped: &mut Tapped, level: f64) {
+        tapped
+            .write(
+                AudioPacket::Samples(vec![level; 2048]),
+                &mut Converter::new(None),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn replacing_a_track_discards_held_audio_before_its_silent_intro() {
+        for equalizer_on in [false, true] {
+            let control = crate::sink::AudioControl::new(crate::sink::DEFAULT_BUFFER_MS);
+            let eq = crate::eq::shared();
+            {
+                let mut settings = eq.lock().unwrap();
+                settings.on = equalizer_on;
+                settings.bands_db[0] = 12.0;
+            }
+            let (mut tapped, recorded) = recorded_tap(Arc::clone(&control), eq);
+            write_level(&mut tapped, 0.25);
+            control.interrupt();
+            // Old packets can still arrive while the replacement is loading.
+            write_level(&mut tapped, 0.25);
+            control.interrupt();
+            control.track_changed();
+            recorded.lock().unwrap().clear();
+            write_level(&mut tapped, 0.0);
+            assert!(
+                recorded.lock().unwrap().iter().all(|sample| *sample == 0.0),
+                "the old limiter delay and equalizer tail must not reach the new track"
+            );
+        }
+    }
+
+    #[test]
+    fn a_confirmed_seek_discards_the_processing_history() {
+        let control = crate::sink::AudioControl::new(crate::sink::DEFAULT_BUFFER_MS);
+        let (mut tapped, recorded) = recorded_tap(Arc::clone(&control), crate::eq::shared());
+        write_level(&mut tapped, 0.25);
+        control.handle_player_event(&librespot_playback::player::PlayerEvent::Seeked {
+            play_request_id: 1,
+            track_id: librespot_core::SpotifyUri::from_uri("spotify:track:14XWXWv5FoCbFzLksawpEe")
+                .unwrap(),
+            position_ms: 0,
+        });
+        recorded.lock().unwrap().clear();
+        write_level(&mut tapped, 0.0);
+        assert!(recorded.lock().unwrap().iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn natural_track_changes_and_pause_keep_the_limiter_tail() {
+        let control = crate::sink::AudioControl::new(crate::sink::DEFAULT_BUFFER_MS);
+        let (mut tapped, recorded) = recorded_tap(Arc::clone(&control), crate::eq::shared());
+        write_level(&mut tapped, 0.25);
+        control.track_changed();
+        tapped.stop().unwrap();
+        tapped.start().unwrap();
+        recorded.lock().unwrap().clear();
+        write_level(&mut tapped, 0.0);
+        let samples = recorded.lock().unwrap();
+        assert!(samples[..706].iter().all(|sample| *sample == 0.25));
+        assert!(samples[706..].iter().all(|sample| *sample == 0.0));
+    }
     fn sine(hz: f32, amplitude: f32, count: usize) -> Vec<f32> {
         (0..count)
             .map(|i| amplitude * (i as f32 / SAMPLE_RATE as f32 * hz * std::f32::consts::TAU).sin())
@@ -715,6 +891,44 @@ mod tests {
                 .iter()
                 .zip(bars.iter())
                 .any(|(after, before)| after.height < before.height)
+        );
+    }
+
+    /// Frames at half rate (out of focus, or saving energy) move the bars as
+    /// far as two frames at full rate, and a long gap owes no more than that.
+    #[test]
+    fn half_rate_frames_fall_as_fast_as_full_rate() {
+        let loud = sine(1000.0, 0.5, FFT_SAMPLES);
+        let silence = vec![0.0; FFT_SAMPLES];
+        let start = Instant::now();
+        let mut full = Analyser::default();
+        let mut half = Analyser::default();
+        full.step(&loud, start);
+        half.step(&loud, start);
+        let mut at_full = Vec::new();
+        for frame in 1..=8 {
+            at_full = full.step(&silence, start + STEP * frame).to_vec();
+        }
+        let mut at_half = Vec::new();
+        for frame in 1..=4 {
+            at_half = half.step(&silence, start + STEP * (2 * frame)).to_vec();
+        }
+        assert_eq!(
+            at_half.iter().map(|bar| bar.height).collect::<Vec<_>>(),
+            at_full.iter().map(|bar| bar.height).collect::<Vec<_>>()
+        );
+
+        let mut gap = Analyser::default();
+        let first = gap.step(&loud, start);
+        let after = gap.step(&silence, start + Duration::from_secs(5));
+        let fell: Vec<_> = first
+            .iter()
+            .zip(after.iter())
+            .map(|(before, after)| f32::from(before.height) - f32::from(after.height))
+            .collect();
+        assert!(
+            fell.iter().all(|rows| *rows <= 2.0 * FALLOFF + 1.0),
+            "a long gap moved the bars more than two steps: {fell:?}"
         );
     }
 

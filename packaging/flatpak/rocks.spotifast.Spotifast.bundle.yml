@@ -3,7 +3,7 @@
 # job unpacks the release tarball into built/ beside this file first.
 id: rocks.spotifast.Spotifast
 runtime: org.freedesktop.Platform
-runtime-version: '24.08'
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 command: spotifast
 finish-args:
@@ -12,6 +12,8 @@ finish-args:
   - --share=ipc
   - --device=dri
   - --socket=pulseaudio
+  # Soloist's private audio route, for its equalizer and visualizers.
+  - --filesystem=xdg-run/pipewire-0
   - --share=network
   # Platform storage for this application's Spotify grants.
   - --talk-name=org.freedesktop.secrets

@@ -12,6 +12,10 @@ use std::f64::consts::PI;
 /// Input samples each output sample is made from. Sixty-four give a
 /// passband flat to about 19 kHz and images under the window's floor.
 const TAPS: usize = 64;
+/// Frames each step of the stereo dot product takes, each with its own
+/// running sum per channel, so the sums do not wait on one another and
+/// the compiler can keep them in vector registers on any target.
+const LANES: usize = 8;
 
 pub struct Resampler {
     up: usize,
@@ -52,21 +56,33 @@ impl Resampler {
     /// Converts a chunk of interleaved frames. The output is what the
     /// input so far allows; the last few frames wait for the next chunk.
     pub fn process(&mut self, samples: &[f32]) -> Vec<f32> {
+        let expected = samples.len() * self.up / self.down + self.channels;
+        let mut out = Vec::with_capacity(expected);
+        self.process_into(samples, &mut out);
+        out
+    }
+
+    /// `process`, appending to `out`. Allocates nothing when `reserve` was
+    /// told the size of `samples` and `out` has room for what comes of it.
+    pub fn process_into(&mut self, samples: &[f32], out: &mut Vec<f32>) {
         self.input.extend_from_slice(samples);
         let half = TAPS / 2;
         let frames = self.input.len() / self.channels;
-        let expected = samples.len() * self.up / self.down + self.channels;
-        let mut out = Vec::with_capacity(expected);
         while self.next + half < frames {
             let taps = &self.taps[self.phase * TAPS..(self.phase + 1) * TAPS];
             let start = (self.next + 1 - half) * self.channels;
-            for channel in 0..self.channels {
-                let sum: f32 = taps
-                    .iter()
-                    .enumerate()
-                    .map(|(k, tap)| self.input[start + k * self.channels + channel] * tap)
-                    .sum();
-                out.push(sum);
+            let reach = &self.input[start..start + TAPS * self.channels];
+            if self.channels == 2 {
+                out.extend_from_slice(&stereo_dot(reach, taps));
+            } else {
+                for channel in 0..self.channels {
+                    let sum: f32 = taps
+                        .iter()
+                        .enumerate()
+                        .map(|(k, tap)| reach[k * self.channels + channel] * tap)
+                        .sum();
+                    out.push(sum);
+                }
             }
             let position = self.phase + self.down;
             self.next += position / self.up;
@@ -76,8 +92,54 @@ impl Resampler {
         let keep_from = (self.next + 1 - half).min(frames);
         self.input.drain(..keep_from * self.channels);
         self.next -= keep_from;
-        out
     }
+
+    /// Room for chunks of up to `samples`, on top of what is kept between them.
+    #[cfg(target_os = "linux")]
+    pub fn reserve(&mut self, samples: usize) {
+        let kept = (TAPS + 1) * self.channels;
+        self.input
+            .reserve((kept + samples).saturating_sub(self.input.len()));
+    }
+
+    /// Forgets the signal, as a new resampler would start, without allocating.
+    #[cfg(target_os = "linux")]
+    pub fn reset(&mut self) {
+        let half = TAPS / 2;
+        self.input.clear();
+        self.input.resize((half - 1) * self.channels, 0.0);
+        self.next = half - 1;
+        self.phase = 0;
+    }
+}
+
+/// Both channels of one output frame: `TAPS` interleaved stereo frames
+/// against one phase's taps. The sums run in `LANES` parts per channel and
+/// are added at the end, which is a rounding's difference (about 1e-7 of
+/// full scale, under -130 dB) from adding the taps one after another.
+#[inline]
+fn stereo_dot(reach: &[f32], taps: &[f32]) -> [f32; 2] {
+    let mut left = [0.0f32; LANES];
+    let mut right = [0.0f32; LANES];
+    let (frames, _) = reach.as_chunks::<2>();
+    let (frames, _) = frames.as_chunks::<LANES>();
+    let (taps, _) = taps.as_chunks::<LANES>();
+    for (frames, taps) in frames.iter().zip(taps) {
+        for (((to_left, to_right), frame), tap) in
+            left.iter_mut().zip(&mut right).zip(frames).zip(taps)
+        {
+            *to_left += frame[0] * tap;
+            *to_right += frame[1] * tap;
+        }
+    }
+    [sum_lanes(left), sum_lanes(right)]
+}
+
+/// A pairwise sum, the same on every target.
+#[inline]
+fn sum_lanes(lanes: [f32; LANES]) -> f32 {
+    ((lanes[0] + lanes[4]) + (lanes[2] + lanes[6]))
+        + ((lanes[1] + lanes[5]) + (lanes[3] + lanes[7]))
 }
 
 /// The taps for every phase: a sinc cut just under the lower of the two
@@ -179,5 +241,26 @@ mod tests {
             at = end;
         }
         assert_eq!(out, whole);
+    }
+
+    /// The stereo path's split sums land within a rounding of the plain
+    /// one-tap-after-another sum the other channel counts use.
+    #[test]
+    fn stereo_matches_the_plain_sum_within_a_rounding() {
+        let stereo: Vec<f32> = tone(997.0, 44100, 20_000)
+            .chunks(2)
+            .enumerate()
+            .flat_map(|(i, frame)| [frame[0], frame[1] * if i % 3 == 0 { -0.7 } else { 0.4 }])
+            .collect();
+        let left: Vec<f32> = stereo.iter().step_by(2).copied().collect();
+        let right: Vec<f32> = stereo.iter().skip(1).step_by(2).copied().collect();
+        let both = Resampler::new(44100, 48000, 2).unwrap().process(&stereo);
+        let plain_left = Resampler::new(44100, 48000, 1).unwrap().process(&left);
+        let plain_right = Resampler::new(44100, 48000, 1).unwrap().process(&right);
+        assert_eq!(both.len(), plain_left.len() * 2);
+        for (n, frame) in both.chunks(2).enumerate() {
+            assert!((frame[0] - plain_left[n]).abs() < 1e-6, "left {n}");
+            assert!((frame[1] - plain_right[n]).abs() < 1e-6, "right {n}");
+        }
     }
 }

@@ -6,14 +6,21 @@ nav_order: 5
 
 MilkDrop shows colourful animations that react to your music. Open it from
 the top-bar visualiser button, Ctrl+Shift+K, Settings, or the mini player's
-**V** menu. It runs in its own window.
+**V** menu. It runs in its own window. With a classic Winamp skin on, that
+window wears the skin's frame, as it did in Winamp 5, with a title bar, a close
+button and a corner to resize it by. Double-click it or press **F** for
+fullscreen; leaving fullscreen brings the frame back. The next and previous
+preset keys and the right-click below work in it too; the other MilkDrop keys
+and the song title are only in the plain window. Windows Media Player skins also show
+it in their visualisation areas; see
+[Windows Media Player skins](/winamp/#windows-media-player-skins).
 
 <video autoplay loop muted playsinline preload="metadata" poster="/assets/images/milkdrop-poster.jpg" aria-label="MilkDrop running in Spotifast" style="width: 100%; height: auto;">
   <source src="/assets/images/milkdrop.mp4" type="video/mp4">
 </video>
 
-MilkDrop is included on Linux and macOS, and in the Windows download for
-Intel or AMD PCs. It is not included in the Windows on ARM download.
+MilkDrop is included on Linux, macOS and Windows, on Intel, AMD and ARM
+PCs alike.
 
 ## The window
 
@@ -24,6 +31,11 @@ corner to resize it.
 Like the other visualisers, MilkDrop follows changes you make with the
 equalizer. Turning down the volume does not change the picture, even at zero.
 It reacts only to music playing on this computer.
+
+MilkDrop stops drawing while its window is minimised, and on macOS and Linux
+also while it is covered. While the system saves energy it draws at most 30
+frames a second, and one a second while the display is off or the screen is
+locked.
 
 ## Presets
 

@@ -7,12 +7,17 @@ nav_order: 3
 
 ## Middle-click autoscroll
 
-On Windows, since 0.8.0, and on Linux once turned on, middle-click a scrolling
-list or its empty background, then move the pointer away from the starting
-point. That list follows the pointer, faster as the distance grows. Moving across another pane keeps the original list in control.
+On Windows, since 0.8.0, and on Linux once turned on, middle-click anywhere
+in a scrolling list, then move the pointer away from the starting point. That
+list follows the pointer, faster as the distance grows, and the pointer shows
+the direction it is scrolling. Speed and dead zone match Chromium's
+autoscroll. Moving across another pane keeps the original list in control.
 A small dead zone prevents an ordinary middle-click from moving the view.
-Click again, press Esc, turn the wheel, or switch to another window to stop.
-Buttons and text fields keep their normal middle-click behavior.
+You can also hold the middle button while moving and release it to stop.
+Otherwise click again, press Esc, turn the wheel, or switch to another window
+to stop.
+Text fields keep middle-click paste, and sliders and scroll bars keep their
+own dragging.
 
 This works automatically on Windows, with no setting to enable. On Linux, turn
 on **Middle-click autoscroll** under **Settings > Appearance**. It is off by
@@ -20,6 +25,45 @@ default, because Linux desktops usually paste the primary selection on middle
 click. macOS retains its existing middle-click behavior.
 
 ## Scrolling shelves
+
+The tiles at the top of Home show what you played most recently, as
+Spotify's Home does: the playlists, albums, artists and podcasts you played
+from, Liked Songs, and songs you played on their own, newest first. A tile
+opens its page, and its play button starts it again; a song's tile plays the
+song and opens its album. Until Spotify's play history arrives, or when it
+holds fewer than eight, Liked Songs and the first playlists in your Library
+fill the rest.
+
+**Made for you** shows the personalized playlist cards Spotify returns for
+your account, in Spotify's order, when local playback and a current Web API
+Home grant for that playback account are available. If local playback is
+unavailable, the session read fails, or the grant check fails, the same shelf
+shows approximate matches found through a Web API playlist search, which can
+be rate-limited. If a refresh fails, cards already on screen remain available;
+**Retry** is shown when the first load fails. Spotify DJ is left out because
+Spotifast cannot play its special context.
+
+**Your top mixes** follows Made for you with the artist, genre and decade
+mixes Spotify builds from your listening, in Spotify's order. It comes from
+the same personalized read and has no fallback: the shelf appears once
+local playback has read it, and stays hidden for accounts Spotify gives no
+top mixes. If a refresh fails, the mixes already on screen remain.
+
+**New releases** shows the latest albums, EPs and singles from the artists
+you follow, newest first. A card opens its release. The shelf's title opens
+the **New releases** page, which lists every song of those releases, newest
+release first, with Play and Shuffle as on a playlist. The releases come
+from the feed behind the bell in Spotify's own apps when local playback is
+set up; reading it there does not mark anything as seen in Spotify. Without
+local playback, or when that feed cannot be read, the shelf asks the Web API
+for the newest albums and singles of up to 50 of the artists you follow
+instead. The shelf stays hidden when there are no releases.
+
+In Discover Weekly and Spotify's other playlists, a song's menu offers
+**Hide in this playlist**, as Spotify's apps do. A hidden song stays in the
+list, greyed out, and is skipped when the playlist plays; **Show in this
+playlist** brings it back. Spotify keeps the choice, so it carries over to
+its other apps. This needs local playback.
 
 Point at a horizontal shelf, such as Made for you or Recently played on
 Home, and hold `Shift` while turning the mouse wheel. The shelf moves while
@@ -62,7 +106,9 @@ Selected rows have a translucent neutral highlight. Keyboard focus uses
 the row highlight without an extra outline.
 
 Dragging an unselected row copies just that song. Reordering within a
-playlist still moves one song at a time.
+playlist still moves one song at a time. Several selected songs dropped back
+between the rows of their own open playlist stay where they are. Dropped on
+that playlist in the sidebar, they ask before being added again.
 
 ## Copying and pasting songs
 
@@ -86,6 +132,10 @@ another playlist moves them there.
 These keys edit the text instead while a search, filter or other text field
 has focus.
 
+To copy a song's title or artists instead of its link, right-click it and open
+**Copy details**. It offers the song title, the artists, or both as
+"Artist - Title".
+
 Clear any playlist filter or sort before placing songs between rows, so the
 visible positions match Spotify's order. A duplicate confirmation keeps the
 chosen position when you select **Add anyway**. Dragging near the top or bottom
@@ -107,12 +157,22 @@ order when Shuffle is off. Shuffle chooses a random starting song unless you
 choose a specific row. To resume the current song at its paused position,
 use **Play** in the bottom player bar or press `Space`.
 
+To hear a song immediately after the current one, right-click it and choose
+**Play next**. A selection of songs is inserted in displayed order, ahead of
+the songs already queued. This works while playing or paused on this computer;
+the option is disabled when controlling another device. **Add to queue** puts
+songs after those already queued. See [The Queue's Rules](/queue/).
+
 The **Shuffle** button beside **Play** selects the playback order without
 starting the playlist. Select Shuffle first, then press **Play**.
 
 When you start a song from a sorted playlist or Liked Songs, it appears in
 the player bar straight away while playback connects. Sorting changes the
 order you hear without rearranging the playlist saved on Spotify.
+
+Local songs show readable titles, artists, and albums, including spaces and
+accented characters. Names saved in older playlist caches are corrected
+automatically when the cache is read.
 
 Sorted and filtered views omit unavailable songs and local files from playback.
 The rows stay visible, and selecting a repeated song starts that occurrence. Filtering a playlist or Liked Songs plays only the matching songs,
@@ -127,6 +187,24 @@ default order, where the rows on screen match the order saved on Spotify.
 Right-clicking the playing song in the player bar offers the same removal
 while it plays from a playlist you can edit.
 
+## Viewing cover artwork
+
+Click the cover at the top of a playlist, album, artist, or podcast page to
+see it enlarged, at the largest size Spotify has. Click anywhere or press
+`Esc` to return to the page.
+
+## Links in playlist descriptions
+
+Links in a playlist's description stand out from the rest of it and can be
+clicked: a link to a Spotify playlist, artist or other page opens it here, and
+a web link opens in your browser.
+
+## Release dates
+
+Hover over the year at the top of an album, single or EP page to see its full release
+date, like "Oct 5, 2026". Spotify knows some releases only to the year, for 
+those, hovering will just show the year.
+
 ## Refreshing a playlist
 
 Since 0.8.0, choose **Refresh** in a playlist's **…** menu to reload
@@ -136,12 +214,29 @@ filtering and sorting stay visible. Spotifast finishes saving your edits before
 loading changes from Spotify. If loading fails, your songs stay visible and
 you can choose **Retry**.
 
+A podcast's **…** menu has the same **Refresh**. It asks Spotify for the
+podcast again instead of reusing the episodes loaded earlier, so new
+episodes appear without restarting Spotifast. The episodes already shown
+stay until the new list arrives.
+
 ## Playing from the sidebar
 
 Double-click a playlist, Liked Songs, album, artist, or podcast row in the
 Library sidebar to start playing it. A single click still opens the row's page.
 Pointing at a row's cover art also shows a play button, but only when the
 sidebar is not in compact mode.
+
+## Playing a song from search
+
+A song picked from the search results plays on its own, and, with Autoplay on,
+Spotify continues with songs it suggests after it, as in the Spotify apps. The other results are
+not queued after it.
+
+## Opening a Spotify link
+
+Paste a link to a song, album, artist, playlist or podcast into the search box
+and press `Enter` to open it. A link to a song opens its album with the song
+selected and in view. Spotifast does not start playing it.
 
 ## Search from a launcher
 
@@ -192,6 +287,20 @@ remove selected songs from a playlist you can edit, just like **Remove from
 this playlist**. On macOS, both `Delete` and `Fn+Delete` work. Text fields,
 dialogs and open menus keep Delete from acting on the list.
 
+Press and hold the player bar's volume slider to update local volume without
+moving the pointer. Spotifast's own Soloist follows a drag as you go; other
+remote volume is sent on release. Both keep your chosen
+level while Spotify updates, including during rate limits. Fresh updates
+can confirm the level or show a change made on another device. Some speakers,
+Sonos among them, report the old level for a few seconds after a change, so
+for six seconds the slider keeps your level over such a report. If the volume
+request fails, an error appears and the slider returns to the reported level.
+The seek slider previews on press and seeks on release.
+
+The default local output smooths volume and mute changes over 30 ms. Explicit
+track changes and play/pause/stop use nominal 50 ms fades. Stopping can shorten
+the fade to the queued audio. Natural track transitions remain gapless.
+
 Left and right arrows adjust a focused volume slider by five percentage
 points, or the seek slider by one percent of the song. Screen readers can
 also read and set these sliders' values. `Ctrl+F` (`Cmd+F` on macOS) focuses
@@ -214,16 +323,23 @@ Winamp skins do not yet have equivalent accessibility coverage.
 | `M` | Mute |
 | `B` | Like or unlike the playing song |
 | `S` / `R` | Shuffle / cycle repeat |
-| `Q` | Queue panel |
+| `Q` | Queue panel, or the queue column in full screen |
+| `F` | Enter or leave full screen lyrics |
+| `V` | Full screen lyrics: MilkDrop or the cover's art behind the words |
+| `N` / `P` | Full screen lyrics: next or previous MilkDrop preset |
 | `Ctrl+F` or `/` | Search |
 | `Ctrl+B` | Show or hide the sidebar |
 | `Alt+←` / `Alt+→` | Back or forward |
+| `Page Up` / `Page Down` | Scroll the main page one page |
+| `Home` / `End` | Top or bottom of the main page |
 | `Ctrl+H` / `Ctrl+L` | Home / Liked Songs |
 | `Ctrl+Shift+A` / `Ctrl+Shift+B` | Playing artist / album |
 | `Ctrl+A` | Select every song in a playlist, album or Liked Songs |
 | `Ctrl+C` / `Ctrl+V` | Copy the selected songs' links / add copied song links to your playlist |
 | `Ctrl+X` | Copy the selected songs' links and remove the songs from your playlist |
-| `Ctrl+M` | Winamp mini player |
+| `Shift+Q` | Add the selected songs to the queue, or show the queue if none are selected |
+| `Shift+N` | Play the selected songs next, on this computer |
+| `Ctrl+M` | Mini player |
 | `Ctrl+Shift+K` | MilkDrop |
 | `Ctrl+,` | Settings |
 | `Ctrl+/` or `?` | All shortcuts |
@@ -231,6 +347,11 @@ Winamp skins do not yet have equivalent accessibility coverage.
 
 On macOS, `Cmd` replaces `Ctrl`. A focused text field keeps its usual keys
 for its own text.
+
+Repeat cycles through off, the whole list, and one song. As in Spotify's own
+apps, choosing another song while one song repeats (Next, Previous, or playing
+a song) turns Repeat One back into repeating the whole list. Previous that
+restarts the song keeps it repeating.
 
 ## Controlling it from the command line
 
@@ -248,10 +369,15 @@ spotifast seek -- -15         spotifast like
 spotifast seek-to 90          spotifast play-uri spotify:playlist:37i9…
 spotifast show                spotifast transfer <device-id>
 spotifast now-playing [--raw] spotifast devices [--raw]
+spotifast play-search <words> spotifast play-search --kind artist <name>
 ```
 
 `shuffle` and `repeat` toggle when used without an argument. Pass a state to
 set it directly. `like` adds or removes the playing track from your library.
+
+`play-search` searches Spotify and plays the best match: a song, or with
+`--kind album`, `artist`, or `playlist`, one of those from the start. It shows
+a message instead when nothing matches.
 
 `now-playing` prints one readable line. `--raw` prints tab-separated fields:
 state, title, artists, album, position_ms, duration_ms, volume, shuffle,
@@ -277,12 +403,14 @@ random token). Use the command rather than the channel itself.
 
 ## Updates
 
-The Windows installer, Mac app, and portable Windows and Linux downloads
-update from inside Spotifast. Click the green update button to download a
+The Windows installer, Mac app, AppImage, and portable Windows and Linux
+downloads update from inside Spotifast. Click the green update button to download a
 release, then choose when to restart and install it. Settings can enable
 automatic background downloads; restarting always waits for your click.
 Closing the update window keeps a download running. You can also check for a
 new release from Settings, or on macOS from the application menu.
+**Release notes** in **Settings > About** opens the GitHub release page of
+the version you are running, to read what changed.
 
 Spotifast checks each download before installing it. An interrupted or damaged
 download leaves the running app alone, and a failed startup restores the
@@ -291,10 +419,28 @@ move Spotifast to Applications before updating it.
 
 Package-managed installations update through their package manager,
 including Homebrew, Flatpak, apt, dnf, pacman, Nix, and Cargo. Other
-installations, the AppImage among them, use the [Download page](/download/).
-Portable archives identify themselves with `spotifast-portable.txt`.
+installations use the [Download page](/download/). Portable archives
+identify themselves with `spotifast-portable.txt`. On Windows, a portable
+copy keeps its settings, state and caches in the `spotifast-data` folder
+next to it, which updates leave as it is (see
+[portable copies](/settings-and-files/#portable-copies)). The AppImage
+updates itself when you own it and can write to its folder, such as
+`~/Applications`; one in a system folder or someone else's says so and
+links to the release instead. AppImage updaters such as AppImageUpdate and
+Gear Lever work as well, from the update information inside it.
 
 ## Library order
+
+Select **By You** under Playlists to show only playlists owned by your signed-in
+account, alongside Liked Songs. Followed playlists and collaborative playlists
+owned by someone else are hidden, including pinned ones. The selected sort still
+applies. In text search and sorts that do not support folders, the playlists are shown 
+in a flat list. In sorts that do support folders, folders stay in place with only your
+playlists inside: folders left empty are hidden, counts show your playlists,
+and collapsed folders stay collapsed. Turn By You off to restore the full list.
+The choice is remembered on this computer and only affects the Playlists shelf.
+It uses the ownership information already loaded with your library and makes no
+additional Spotify requests.
 
 Since 0.8.0, the menu below the Library filters selects an order
 for each section. **Name** and **Recently played** are available throughout.
@@ -303,9 +449,15 @@ dates. Spotify does not supply equivalent dates for followed playlists or
 artists, so those sections do not offer that choice. Entries with missing save
 dates come last.
 
+**Name** keeps your Spotify playlist folders, as Spotify does: playlists sort
+by name inside each folder, and folders sort by name among the playlists
+beside them. A search still lists matching playlists flat.
+
 **Spotify custom order** follows your playlist order and folders from Spotify.
 Set up playback on this computer to load that order. Your playlists stay
 visible while it loads, and Spotifast remembers the last order for your account.
+When you rearrange your library in another Spotify app, Spotifast picks up the
+new order when you switch back to it.
 Items you pin in Spotifast remain at the top, including items from a closed
 folder. Sorting or dragging Library items changes their order only in
 Spotifast; it does not rearrange your Spotify library.
@@ -336,14 +488,55 @@ song, wherever the row sits.
 **Player bar visualizer** in **Settings > Appearance** shows the song moving
 behind the player bar's controls: **Spectrum** draws glowing bars from bass
 to treble with peaks that hang and fall, and **Waveform** draws the sound's
-wave as a glowing line, both in colours drawn from the cover. It follows the equalizer, not the volume, and moves only while the
+wave as a glowing line. With **Colour from album art** on, both sweep from
+bass to treble across up to four colours read from the cover, its hues first
+and its greys after, so a black and white cover moves in grey; with it off,
+they take the accent colour. It follows the equalizer, not the volume, and moves only while the
 song plays on this computer. It is off by default. Clicking the player
 bar's empty space switches it, as Winamp's visualizer did: off, then
-Spectrum, then Waveform, then off again.
+Spectrum, then Waveform, then off again. **Frame rate** in **Settings >
+Appearance** sets how often it and the mini player's analyser draw: 30, 60
+(the default), the rate of the screen showing the window, or Uncapped,
+which follows the display. They draw at half that rate while Spotifast's
+window is out of focus, at most 30 frames a second while the system saves
+energy, and not at all while nobody can see the window: minimised, in the
+tray, with the display off or the screen locked. MilkDrop has its own frame
+rate. Disable **Click player bar to change
+visualizer** in **Settings > Appearance** to prevent accidental changes.
+
+Spotifast follows the system when it asks for less motion: **Animation
+effects** turned off in Windows, **Reduce motion** on macOS, or GNOME's
+**Animations** turned off. Its animations then show where they end at once:
+the player bar's colour changes without fading, lyrics jump to the sung line,
+and a new theme replaces the old one without the reveal. Spinners still turn.
 
 In **Settings > Appearance**, **Compact track list** puts each song on one
 line. In narrow lists, the added date follows the artist credits with a spaced
 bullet; each artist name remains a separate link.
+
+## Starting with your computer
+
+**Settings > Playback on this computer > Start with your computer** opens
+Spotifast when you log in. **With the window** opens it as you would;
+**In the tray** starts it without a window, ready for media keys and the tray
+icon; on macOS it reads **In the menu bar**. **Off** leaves your login alone.
+
+The setting is your system's own list of what starts at login, read back each
+time Settings opens, so turning Spotifast off there (System Settings on macOS,
+Task Manager's Startup apps on Windows, your desktop's autostart settings on
+Linux) shows here too.
+
+- **In the tray** needs **Keep music playing when the window closes**: without
+  it nothing could bring a hidden window back, so the window opens instead and
+  the row says so. The window also opens when no panel shows the tray icon
+  within 30 seconds of logging in.
+- **macOS** asks you to allow it in **System Settings > General > Login
+  Items** when it holds the item for approval; the row says so until then.
+  It needs macOS 13 or later and the app from the disk image or Homebrew.
+- **Flatpak** asks the desktop's background portal, which may ask you first.
+  A change made later in the desktop's own settings is not seen by Spotifast.
+- If Spotifast is already running when the login entry runs, nothing happens:
+  it stays where it is.
 
 ## Windows taskbar controls
 
@@ -363,7 +556,7 @@ keys and the system's now-playing controls continue working while the window
 is closed.
 
 For the Winamp mini player, turn off **Show in taskbar** under
-**Settings > Winamp skins**, or **Show in taskbar** in its options menu.
+**Settings > Mini player**, or **Show in taskbar** in its options menu.
 The choice survives restarts. The mini player stays visible; the tray icon,
 **Ctrl+M**, the skin logo, and launching Spotifast again remain ways to reach
 the app. Returning to the main window always restores its taskbar button.
@@ -374,17 +567,44 @@ follow the window manager's skip-taskbar state. Wayland has no standard way
 for an app to leave the taskbar, so the option is not offered there; use your
 desktop's window rules instead. It does not change the macOS Dock.
 
-On Windows, since 0.8.0, the mini player starts on the current desktop if its
-saved title bar is outside every connected monitor’s work area. Positions on
-connected secondary monitors still restore. Reinstalling preserves settings;
-it is not needed to recover a position left on an unplugged display.
+A window saved on a display that is no longer connected opens on the
+primary display instead: on Windows and X11 it moves to the middle of the
+primary monitor as it opens, and on macOS a position whose title bar would be
+on no screen is not used. Positions on connected secondary displays still
+restore. Reinstalling preserves settings; it is not needed to recover a
+position left on an unplugged display.
 
-## macOS Dock menu
+## macOS menu bar and Dock menu
+
+Click Spotifast's menu-bar icon to open its menu. From there you can show or
+hide the window, control playback, or quit Spotifast. The menu opens from
+either a primary or secondary click, as other macOS menu-bar items do.
+It stays available with the main window open, with the Winamp mini player,
+and after closing the window to the menu bar.
+
+Spotifast also shows its Dock icon when run directly through Cargo, without
+an installed app bundle.
 
 Right-click or Control-click Spotifast's Dock icon for **Play** (or **Pause**
 while music plays), **Next**, and **Previous**, above the standard Dock items.
 They control the same playing device as the player bar and keep working while
 the window is closed to the menu bar.
+
+### Menu bar only
+
+Turn off **Show in Dock** under **Settings > Playback on this computer** to
+run Spotifast from the menu bar alone. The Dock icon goes at once, without a
+restart, and the window stays open in front. Spotifast then also leaves the
+Cmd+Tab switcher and shows no menu bar of its own while you use it, as other
+menu-bar apps do. Its keyboard shortcuts, including Cmd+Q, Cmd+comma and
+copy and paste, keep working in the window.
+
+The menu-bar icon stays: it is how you show the window again after closing
+it, and how you quit while the window is closed. Opening Spotifast again from
+Finder or Launchpad also brings the window back. Turn the setting on to put
+Spotifast back in the Dock. The choice survives restarts, and Spotifast
+starts without the Dock icon; the Dock may show it for a moment as the app
+launches. This option is only on macOS.
 
 ## Keeping the mini player above other windows
 
@@ -424,6 +644,12 @@ resume playback directly from the notch.
 To turn on the notch overlay, check **MacBook notch widget** in
 Settings under **Playback on this computer**.
 
+## Where the music is playing from
+
+Above the current song, the queue panel says what it is playing from: the
+playlist, album, artist or other page. Click the name to open that page. A
+radio has no page, so its name is plain text.
+
 ## Recent
 
 The queue panel's second tab combines Spotify's history with tracks played
@@ -447,12 +673,83 @@ On Windows, the main window's minimize, maximize, and close buttons share the
 top bar with Spotifast's controls. Drag an empty part of that bar to move or
 snap the window, and drag a window edge or corner to resize it.
 
+## When Spotify won't play a song here {#audio-key}
+
+If a song shows up as playing but nothing plays, and a banner says Spotify
+won't let this computer play this song right now, see
+[Spotify refused the audio key](/troubleshooting/#audio-key).
+
+## Choosing the audio output
+
+**Audio output**, at the bottom of the device picker, chooses where music
+played on this computer goes: the system's default output, or a sound card,
+headset, HDMI output, or virtual device such as VoiceMeeter. Click it to list
+this computer's outputs, then pick one; local playback restarts on it at the
+same place in the song. **System default** follows the system again, and moves
+with it when the default output changes. The choice is saved as `audio_device`
+in `settings.json`, by the device's own id, so it survives renames and
+reordering. While a saved output is unplugged, music plays through the system
+default, and the output stays listed so you can see and change the choice.
+
+On Linux, Spotifast plays through PipeWire when it is running, otherwise
+through a PulseAudio server, and otherwise straight to ALSA. The picker lists
+that sound system's outputs. Spotifast 0.13.3 and earlier saved an output by
+its name: a name an output still has is kept, and saved by its id the next
+time music plays there. One that no output has any more, such as ALSA's
+**PipeWire Sound Server**, plays through the system default until you choose
+again.
+
+Volume mixers show the stream as **Spotifast**, with its icon, playing
+**Spotify playback**, on PipeWire and PulseAudio. The mixer remembers its
+volume for Spotifast alone.
+
+## Listening activity
+
+The people button in the player bar, beside Queue and Lyrics, opens what the
+people you follow on Spotify are listening to. It takes the place of the
+Queue or Lyrics panel on the right, and they take its place in turn. While
+it is open it refreshes every 15 seconds.
+
+A blue dot on the avatar and bars in place of the time mean the person is
+listening right now. Pointing at an avatar shows a play button: click it to
+play their song, or to pause it when that song is already playing here. The song's title opens its
+album, the artist opens their page, and the line below opens the playlist,
+album or artist it plays from.
+
+The panel needs playback on this computer, since only that session can read
+it. In a very narrow window the people button gives way so the playback
+controls keep their room; widen the window to bring it back.
+
+## Sleep while playing
+
+While music plays on this computer, Spotifast keeps it from going to sleep
+on its own, so a long playlist is not cut off by the idle timer. The display
+still turns off and the screen still locks as usual, and you can still put
+the computer to sleep yourself or close the lid. Pausing or stopping, or
+playing on another device, lets the computer sleep again. On Linux this asks
+the desktop (through the desktop portal, or else systemd-logind), so it
+depends on the desktop honouring the request; GNOME and KDE do.
+
+## Google Cast playback
+
+Google Cast speakers and speaker groups appear in the device picker. Enable
+local playback first, then select the speaker. Since 0.13.1, Spotifast first
+checks that the speaker is a genuine Google Cast device, as Chrome does (0.13.0
+did not), then starts Spotify on
+it, and the speaker plays like any other Spotify Connect device. A device that
+fails the check gets nothing, and Spotifast says it could not prove it is
+genuine.
+
 ## Radio
 
 Since 0.10.0, **Go to song radio** in a song's menu opens a page
 of songs Spotify picks to go with it, without starting playback. Playlist,
 album, and artist menus have **Go to playlist radio**, **Go to album radio**,
 and **Go to artist radio**.
+
+A song radio starts its list with the song it is based on, once, followed by
+the rest of Spotify's mix in its order. Shuffle still decides what plays
+first. If Spotify will not provide the seed song, the radio leaves it out.
 
 Spotify mixes a radio afresh each time it is asked, so the page keeps the
 songs it shows: **Play**, **Shuffle**, and a double-clicked row play those
@@ -462,6 +759,47 @@ after the radio with the songs on the page.
 
 Radio comes from Spotify's playback service, so it needs playback on this
 computer to be set up; the page can then play on any device.
+
+## Play counts
+
+Album pages have a **Plays** column, and an artist's popular songs show
+how often each was played, as Spotify counts them. The counts come from
+Spotify's playback service, so they need playback on this computer to be
+set up. Without it, or when Spotify does not answer, the lists leave the
+counts out. The column needs a window wide enough for it. Click the
+**Plays** heading to sort the album's songs from most to least played, again
+for least to most, and a third time to return to album order. Songs without a
+count sort last.
+
+The same answer gives an artist's monthly listeners, which the top of the
+artist page then shows first.
+
+## Discography
+
+An artist's discography can be narrowed to Albums, Singles & EPs, Compilations
+or Appears On.
+
+## Upcoming albums
+
+Artist pages show a **Release countdown** section between Popular and Discography
+when Spotify supplies a countdown page. Select its album row to open the artwork,
+countdown, track preview and Pre-save button. The preview shows play counts when
+Spotify supplies them and the window has room for the extra column.
+Discovery needs both a ready same-account Spotify access (local playback)
+connection and a verified Web API sign-in, including when Soloist handles
+playback. Until both are ready, a fresh artist visit may show no countdown card.
+Visiting the artist never pre-saves an album. Refresh the artist
+page to check for a newly announced release; cards disappear after release time.
+
+Open a `spotify:prerelease:` URI or an `open.spotify.com/prerelease/` link
+with Spotifast to see the artwork, release countdown and track-list preview.
+This requires local playback authorization. Pre-save adds the resolved album
+to your Spotify library and confirms its saved state. Unavailable preview
+tracks cannot start playback.
+
+The browser's **Open in app** action uses the registered `spotify:` handler.
+Pasting an HTTPS address into the browser opens Spotify's website; Spotifast
+does not take over HTTP or HTTPS associations.
 
 ## Playlist covers
 
@@ -475,27 +813,42 @@ let apps remove a description, so clearing the field keeps the current one.
 You can replace it with other text instead.
 
 If Spotify refuses permission, sign in again and approve image uploads. If you
-use a personal Spotify app, reconnect it in Settings as well.
+use your own Client ID, authorize it again in Settings as well.
 
 ## Lyrics
 
 Choose the microphone button in the player bar, or press **L**, to open lyrics.
+A local file from a playlist shows the words in a `.lrc` file of the same name
+beside it, or in its own tags, and the cover in its tags; otherwise lyrics come
+from LRCLIB by its artist, title, album and length.
 Synced lyrics follow the playing line automatically. Scroll to pause following,
 choose **Follow** to resume it, or choose a line to jump to that part of the song.
 
-The expand button opens lyrics in full screen. Press **Esc** or choose the
-shrink button to return to your previous window size. Full-screen lyrics
+The expand button in the lyrics panel or at the right of the player bar, or
+**F** when no text field has focus, opens lyrics in full screen. A narrow
+window has no room for the player bar's button. Press **F** or **Esc**, or
+choose the shrink button, to return to your previous window size. Full-screen lyrics
 scroll smoothly and highlight the playing line automatically. Scrolling by
 hand pauses following; choose **Follow** to resume. Since 0.11.0, a wide
 window shows the song's cover beside the lyrics, the two centred together,
 and a song without words, such as an instrumental, shows just its cover in
 the middle of the screen.
-The backdrop is the cover's own colours, vivid and slowly turning, and it
-moves with the music: the colours turn faster while the song is loud, embers
-drift up the screen, and a low wave of light follows the spectrum along the
-bottom edge. The line being sung grows, and its words glow in the cover's
-colour as they are sung. A song playing on another device has no sound to
-follow here, so the light breathes slowly instead.
+
+Press **V** in full screen lyrics, or click anywhere that isn't a line of
+lyrics or a control, to put MilkDrop behind the words instead of the cover's
+art, and do the same again to bring the art back; Spotifast remembers which you
+chose. **N** and **P** change the preset there. The picture is dimmed as far as
+it takes to keep the words clear, and holds still while the music is paused.
+It uses the presets you have: with none, the art stays. It follows the sound
+after the equalizer and before the volume, like every visualizer.
+
+Click the album art in full screen lyrics to leave MilkDrop alone on the
+screen, edge to edge and at full brightness, even if it was off. Move the mouse
+to see the player's controls for a few seconds; the cursor hides with them.
+Any other click brings everything back as it was, and **Esc** leaves full
+screen. **V**, **N** and **P** still work. A song with no art, or a computer
+with no MilkDrop to show, stays as it is.
+
 Since 0.10.0, quitting while lyrics are full screen no longer leaves
 the next launch stuck in full screen: the window returns to its previous size.
 

@@ -92,17 +92,26 @@ pub enum Operation {
     PlaylistSearch,
     CatalogSearch,
     Catalog,
+    ArtistTopTracks,
+    RelatedArtists,
     PlaylistMetadata(PlaylistAccess),
     PlaylistItems(PlaylistAccess),
     PlaylistMutation(PlaylistAccess),
     UnsupportedDevelopmentMode,
 }
 
-/// The streaming session reads every playlist the shared app would have
-/// been asked for: other people's, which no personal app may read, and the
-/// account's own when it has no personal app. A personal app keeps its own
-/// playlists, which it reads quickly and with every field.
+/// The streaming session reads popular tracks, related artists and every
+/// playlist the shared app would have been asked for: other people's, which
+/// no personal app may read, and the account's own when it has no personal
+/// app. A personal app keeps its own playlists, which it reads quickly and
+/// with every field.
 fn session_serves(operation: Operation, personal_ready: bool) -> bool {
+    if matches!(
+        operation,
+        Operation::ArtistTopTracks | Operation::RelatedArtists
+    ) {
+        return true;
+    }
     matches!(
         operation,
         Operation::PlaylistMetadata(_) | Operation::PlaylistItems(_)
@@ -114,9 +123,12 @@ fn session_serves(operation: Operation, personal_ready: bool) -> bool {
 fn plan(operation: Operation, personal_ready: bool) -> ApiSource {
     use Operation::*;
     match operation {
-        CanonicalAccount | PlaylistLibrary | PlaylistSearch | UnsupportedDevelopmentMode => {
-            ApiSource::Shared
-        }
+        CanonicalAccount
+        | PlaylistLibrary
+        | PlaylistSearch
+        | ArtistTopTracks
+        | RelatedArtists
+        | UnsupportedDevelopmentMode => ApiSource::Shared,
         PlaylistMetadata(PlaylistAccess::External | PlaylistAccess::Unknown)
         | PlaylistItems(PlaylistAccess::External | PlaylistAccess::Unknown)
         | PlaylistMutation(PlaylistAccess::External | PlaylistAccess::Unknown) => ApiSource::Shared,
@@ -230,18 +242,62 @@ impl ApiGateway {
         Ok(())
     }
 
+    /// Withdraws the old account identity before installing a new grant.
     pub fn begin_verification(&self, source: ApiSource, provider: TokenProvider) {
         let session = self.session(source);
+        // Withdraw the old verified identity before swapping providers. A
+        // concurrent Home request must never see a new provider under the
+        // previous account's Ready state.
+        session.set_state(SessionState::Authorizing);
         let client = session.client().for_authorization(provider);
         *session
             .client
             .write()
             .unwrap_or_else(|lock| lock.into_inner()) = Arc::new(client);
-        session.set_state(SessionState::Authorizing);
     }
 
     pub fn verification_client(&self, source: ApiSource) -> Arc<ApiClient> {
         self.session(source).client()
+    }
+
+    /// Psst's Home section query also carries a Web API grant as `sp_t`.
+    /// Prefer the personal grant without waiting for shared verification.
+    pub(crate) async fn home_context_token(
+        &self,
+        playback_account: &str,
+    ) -> Result<String, ApiError> {
+        let source = [ApiSource::Personal, ApiSource::Shared]
+            .into_iter()
+            .find(|source| {
+                self.state(*source)
+                    .account()
+                    .is_some_and(|account| account.as_str() == playback_account)
+            })
+            .ok_or(ApiError::NotSignedIn)?;
+        let session = self.session(source);
+        let client = session.client();
+        let token = client.home_context_token().await?;
+        // Token refresh may have waited while a different grant was installed.
+        // Reject that answer before pairing it with the playback credential.
+        if !self.home_context_client_matches(source, playback_account, &client) {
+            return Err(ApiError::NotSignedIn);
+        }
+        Ok(token)
+    }
+
+    /// Rejects a grant replaced or reauthorized while its token was pending.
+    fn home_context_client_matches(
+        &self,
+        source: ApiSource,
+        playback_account: &str,
+        client: &Arc<ApiClient>,
+    ) -> bool {
+        let session = self.session(source);
+        Arc::ptr_eq(client, &session.client())
+            && session
+                .state()
+                .account()
+                .is_some_and(|account| account.as_str() == playback_account)
     }
 
     pub fn clear(&self, source: ApiSource) {
@@ -273,28 +329,82 @@ impl ApiGateway {
         matches!(self.state(ApiSource::Personal), SessionState::Ready { .. })
     }
 
-    pub async fn client_for(&self, operation: Operation) -> Result<Arc<ApiClient>, ApiError> {
+    /// Whether the shared app can answer now, rather than after its sign-in
+    /// verification or a rate limit.
+    pub async fn shared_available(&self) -> bool {
+        matches!(self.state(ApiSource::Shared), SessionState::Ready { .. })
+            && !self.shared.client().cooling_down().await
+    }
+
+    /// Reuse configured HTTP transport only after verifying the account.
+    /// Pathfinder itself receives the playback session's Login5 credentials.
+    pub(crate) fn prerelease_http_client(&self) -> Option<Arc<ApiClient>> {
+        [ApiSource::Personal, ApiSource::Shared]
+            .into_iter()
+            .find(|source| matches!(self.state(*source), SessionState::Ready { .. }))
+            .map(|source| self.verification_client(source))
+    }
+
+    /// Whether a shared grant is signed in or being restored. Only listeners
+    /// who signed in before Spotifast stopped offering shared access have one.
+    pub fn has_shared(&self) -> bool {
+        self.state(ApiSource::Shared) != SessionState::Unavailable
+    }
+
+    /// Where an operation goes: as planned, except that without a shared
+    /// grant the personal app answers everything it is asked.
+    fn route(&self, operation: Operation) -> ApiSource {
         let source = plan(operation, self.personal_ready());
-        let session = self.session(source);
-        let mut state = session.state.subscribe();
-        let generation = state.borrow().0;
-        loop {
-            let (current, status) = state.borrow_and_update().clone();
-            if current != generation {
-                return Err(ApiError::NotSignedIn);
-            }
-            match status {
-                SessionState::Ready { .. } => break,
-                SessionState::Unavailable => return Err(ApiError::NotSignedIn),
-                // A personal grant can open the app before the shared grant
-                // finishes verification. Keep shared-only views loading.
-                SessionState::Authorizing => {
-                    state.changed().await.map_err(|_| ApiError::NotSignedIn)?;
+        if source == ApiSource::Shared
+            && !self.has_shared()
+            && self.state(ApiSource::Personal) != SessionState::Unavailable
+        {
+            ApiSource::Personal
+        } else {
+            source
+        }
+    }
+
+    pub async fn client_for(&self, operation: Operation) -> Result<Arc<ApiClient>, ApiError> {
+        // The counters remember a sign-out even if a new sign-in becomes
+        // ready before a waiting request wakes up.
+        let shared_generation = self.shared.state.borrow().0;
+        let personal_generation = self.personal.state.borrow().0;
+        let mut source = self.route(operation);
+        'route: loop {
+            let session = self.session(source);
+            let generation = match source {
+                ApiSource::Shared => shared_generation,
+                ApiSource::Personal => personal_generation,
+            };
+            let mut state = session.state.subscribe();
+            loop {
+                let (current, status) = state.borrow_and_update().clone();
+                if current != generation || status == SessionState::Unavailable {
+                    // Shared access went away, because there was no grant to
+                    // restore or Spotify refused it, without a sign-out: the
+                    // personal app takes over what was waiting for it.
+                    if source == ApiSource::Shared
+                        && self.personal.state.borrow().0 == personal_generation
+                        && self.state(ApiSource::Personal) != SessionState::Unavailable
+                    {
+                        source = ApiSource::Personal;
+                        continue 'route;
+                    }
+                    return Err(ApiError::NotSignedIn);
+                }
+                match status {
+                    SessionState::Ready { .. } => break 'route,
+                    // A personal grant can open the app before the shared grant
+                    // finishes verification. Keep shared-only views loading.
+                    SessionState::Authorizing | SessionState::Unavailable => {
+                        state.changed().await.map_err(|_| ApiError::NotSignedIn)?;
+                    }
                 }
             }
         }
         log::debug!("Spotify route operation={operation:?} source={source}");
-        Ok(session.client())
+        Ok(self.session(source).client())
     }
 
     /// Whether the streaming session, when up, should answer an operation.
@@ -340,6 +450,33 @@ impl ApiGateway {
 mod tests {
     use super::*;
     use std::future::Future;
+
+    /// Rejects a token whose provider changed while resolution was pending.
+    #[tokio::test]
+    async fn home_context_grant_stays_bound_to_the_playback_account() {
+        let gateway = ApiGateway::new(reqwest::Client::new(), Arc::new(NetActivity::default()));
+        gateway.begin_verification(ApiSource::Shared, provider("home-alice", ApiSource::Shared));
+        gateway
+            .install(ApiSource::Shared, AccountId::new("alice"))
+            .unwrap();
+        let old = gateway.verification_client(ApiSource::Shared);
+        assert!(gateway.home_context_client_matches(ApiSource::Shared, "alice", &old));
+        assert!(!gateway.home_context_client_matches(ApiSource::Shared, "bob", &old));
+        assert!(matches!(
+            gateway.home_context_token("bob").await,
+            Err(ApiError::NotSignedIn)
+        ));
+
+        gateway.begin_verification(ApiSource::Shared, provider("home-bob", ApiSource::Shared));
+        assert!(!gateway.home_context_client_matches(ApiSource::Shared, "alice", &old));
+        gateway
+            .install(ApiSource::Shared, AccountId::new("bob"))
+            .unwrap();
+        assert!(!gateway.home_context_client_matches(ApiSource::Shared, "alice", &old));
+        let current = gateway.verification_client(ApiSource::Shared);
+        assert!(!Arc::ptr_eq(&old, &current));
+        assert!(gateway.home_context_client_matches(ApiSource::Shared, "bob", &current));
+    }
 
     #[tokio::test]
     async fn shared_requests_wait_while_a_personal_session_is_already_ready() {
@@ -444,6 +581,51 @@ mod tests {
         }
     }
 
+    /// The shared app can answer only once its sign-in is verified and
+    /// while no rate limit holds it; until then the playlist library is
+    /// read over the playback session instead (#698, #816).
+    #[tokio::test]
+    async fn the_shared_app_is_available_only_verified_and_not_cooling_down() {
+        let gateway = ApiGateway::new(reqwest::Client::new(), Arc::new(NetActivity::default()));
+        assert!(!gateway.shared_available().await, "not signed in");
+        gateway.begin_verification(
+            ApiSource::Shared,
+            provider("available-shared", ApiSource::Shared),
+        );
+        assert!(!gateway.shared_available().await, "still verifying");
+        gateway
+            .install(ApiSource::Shared, AccountId::new("same"))
+            .unwrap();
+        assert!(gateway.shared_available().await);
+        gateway
+            .shared
+            .client()
+            .extend_cooldown(std::time::Duration::from_secs(60))
+            .await;
+        assert!(!gateway.shared_available().await, "rate limited");
+    }
+
+    /// Popular tracks use local playback even when a personal Web API app is ready.
+    #[test]
+    fn artist_popular_tracks_can_use_the_playback_session_with_or_without_personal_access() {
+        let gateway = ApiGateway::new(reqwest::Client::new(), Arc::new(NetActivity::default()));
+        assert!(gateway.session_serves(Operation::ArtistTopTracks));
+        assert!(session_serves(Operation::ArtistTopTracks, true));
+        assert_eq!(
+            plan(Operation::ArtistTopTracks, true),
+            ApiSource::Shared,
+            "the unavailable-session fallback retains its coverage"
+        );
+    }
+
+    #[test]
+    fn related_artists_prefer_the_session_and_keep_the_shared_fallback() {
+        for personal in [false, true] {
+            assert!(session_serves(Operation::RelatedArtists, personal));
+            assert_eq!(plan(Operation::RelatedArtists, personal), ApiSource::Shared);
+        }
+    }
+
     #[test]
     fn routing_matrix_selects_source() {
         let personal = true;
@@ -487,6 +669,90 @@ mod tests {
         ] {
             assert_eq!(plan(operation, false), ApiSource::Shared);
         }
+    }
+
+    /// A listener with only their own app, the only way to sign in now,
+    /// gets every request answered by it, including those the plan gives
+    /// to shared access. A shared grant still signed in keeps its share.
+    #[tokio::test]
+    async fn without_a_shared_grant_the_personal_app_answers_everything() {
+        let gateway = ApiGateway::new(reqwest::Client::new(), Arc::new(NetActivity::default()));
+        gateway.begin_verification(
+            ApiSource::Personal,
+            provider("only-personal", ApiSource::Personal),
+        );
+        gateway
+            .install(ApiSource::Personal, AccountId::new("same"))
+            .unwrap();
+        assert!(!gateway.has_shared());
+        let personal = gateway.verification_client(ApiSource::Personal);
+        for operation in [
+            Operation::CanonicalAccount,
+            Operation::PlaylistLibrary,
+            Operation::PlaylistSearch,
+            Operation::PlaylistItems(PlaylistAccess::External),
+            Operation::UnsupportedDevelopmentMode,
+            Operation::Catalog,
+        ] {
+            let client = gateway.client_for(operation).await.unwrap();
+            assert!(Arc::ptr_eq(&client, &personal), "{operation:?}");
+        }
+
+        gateway.begin_verification(ApiSource::Shared, provider("legacy", ApiSource::Shared));
+        gateway
+            .install(ApiSource::Shared, AccountId::new("same"))
+            .unwrap();
+        assert!(gateway.has_shared());
+        let shared = gateway.verification_client(ApiSource::Shared);
+        let client = gateway
+            .client_for(Operation::PlaylistLibrary)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&client, &shared));
+    }
+
+    /// Restoring a sign-in marks shared access as authorizing before it is
+    /// known whether there is a grant. A request waiting on it goes to the
+    /// personal app when it turns out there is none, but a sign-out still
+    /// ends it.
+    #[tokio::test]
+    async fn a_request_waiting_on_shared_access_that_never_comes_goes_to_the_personal_app() {
+        let gateway = Arc::new(ApiGateway::new(
+            reqwest::Client::new(),
+            Arc::new(NetActivity::default()),
+        ));
+        gateway.set_state(ApiSource::Shared, SessionState::Authorizing);
+        gateway.begin_verification(
+            ApiSource::Personal,
+            provider("restored-personal", ApiSource::Personal),
+        );
+        gateway
+            .install(ApiSource::Personal, AccountId::new("same"))
+            .unwrap();
+        let waiting = tokio::spawn({
+            let gateway = Arc::clone(&gateway);
+            async move { gateway.client_for(Operation::PlaylistLibrary).await }
+        });
+        tokio::task::yield_now().await;
+        gateway.clear(ApiSource::Shared);
+        let client = waiting.await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(
+            &client,
+            &gateway.verification_client(ApiSource::Personal)
+        ));
+
+        gateway.set_state(ApiSource::Shared, SessionState::Authorizing);
+        let waiting = tokio::spawn({
+            let gateway = Arc::clone(&gateway);
+            async move { gateway.client_for(Operation::PlaylistLibrary).await }
+        });
+        tokio::task::yield_now().await;
+        gateway.clear_all();
+        gateway.begin_verification(
+            ApiSource::Personal,
+            provider("next-account", ApiSource::Personal),
+        );
+        assert!(matches!(waiting.await.unwrap(), Err(ApiError::NotSignedIn)));
     }
 
     #[test]

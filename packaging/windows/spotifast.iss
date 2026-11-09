@@ -1,5 +1,9 @@
-﻿; The Windows installer, built with Inno Setup 6.3 or later from a release
-; binary (the release workflow does this on every tag):
+﻿; No longer shipped: releases after 0.14.2 ship only the Windows Installer
+; package (spotifast.wxs), which takes over a copy this script installed.
+; test-msi.py still builds it to make such a copy to take over.
+;
+; The Windows installer, built with Inno Setup 6.3 or later from a release
+; binary (the release workflow did this on every tag up to 0.14.2):
 ;
 ;   iscc /DVersion=0.9.1 /DArch=x86_64 /DBinary=...\spotifast.exe ^
 ;        /DOutputDir=dist packaging\windows\spotifast.iss
@@ -104,6 +108,84 @@ Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueN
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+#if Arch == "x86_64"
+// x64compatible lets this installer run on an ARM PC under emulation, and a
+// copy installed from it keeps updating to x64. The ARM installer has
+// everything this one has and runs natively, so point to it. A silent
+// install (an update) goes ahead without asking.
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  if IsArm64 and not WizardSilent then
+    Result := MsgBox('This PC has an ARM processor. The ARM installer ' +
+      '(aarch64) runs natively, faster and on less battery.' + #13#10#13#10 +
+      'Install the version for Intel and AMD processors anyway?',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+#endif
+
+procedure CloseInstalledSpotifast;
+var
+  Locator, Services, Processes, Process, Path: Variant;
+  Index: Integer;
+  Exe: String;
+begin
+  Exe := ExpandConstant('{app}\{#AppExeName}');
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Services := Locator.ConnectServer('', 'root\CIMV2');
+    Processes := Services.ExecQuery('SELECT * FROM Win32_Process WHERE Name = ''{#AppExeName}''');
+    for Index := 0 to Processes.Count - 1 do begin
+      Process := Processes.ItemIndex(Index);
+      Path := Process.ExecutablePath;
+      // A portable copy can have the same name. Never close it by name alone.
+      if not VarIsNull(Path) then
+        if CompareText(Path, Exe) = 0 then
+          Log('Closing installed Spotifast: result ' + IntToStr(Process.Terminate(0)));
+    end;
+  except
+    Log('Could not close installed Spotifast: ' + GetExceptionMessage);
+  end;
+end;
+
+// CloseApplications covers Setup, not Uninstall. Check the installed file
+// before removing anything, including the uninstaller needed to try again.
+function InitializeUninstall: Boolean;
+var
+  Exe: String;
+  Probe: TFileStream;
+begin
+  Result := False;
+  Exe := ExpandConstant('{app}\{#AppExeName}');
+  while FileExists(Exe) do begin
+    try
+      // Windows denies write access to a running executable. Do not write
+      // anything: opening it also catches other locks on this exact copy.
+      Probe := TFileStream.Create(Exe, fmOpenReadWrite or fmShareExclusive);
+      Probe.Free;
+      Result := True;
+      Exit;
+    except
+      Log('Cannot open the installed executable for uninstall: ' + GetExceptionMessage);
+    end;
+    if UninstallSilent then
+      Exit;
+    case SuppressibleTaskDialogMsgBox('Spotifast cannot be removed yet.',
+      'Its program file is in use or inaccessible. Quit Spotifast and retry, or close it here to continue.' + #13#10#13#10 +
+      'Close Spotifast ends the process immediately. Unsaved changes may be lost.',
+      mbError, MB_YESNOCANCEL, ['Retry', 'Close Spotifast'], 0, IDCANCEL) of
+      IDYES: ;
+      IDNO: begin
+        CloseInstalledSpotifast;
+        Sleep(200);
+      end;
+    else
+      Exit;
+    end;
+  end;
+  Result := True;
+end;
+
 // The spotify: scheme key is shared with whatever else opens the links, so
 // uninstalling takes it away only while it still names this program.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

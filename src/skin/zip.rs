@@ -50,6 +50,22 @@ pub struct Entry {
     header_offset: usize,
 }
 
+/// Where the local header of the entry named `name` is, by looking.
+fn find_local_header(data: &[u8], name: &str) -> Option<usize> {
+    let signature = LOCAL_HEADER.to_le_bytes();
+    let named = |at: usize| {
+        data.get(at + 26..at + 28)
+            .map(|bytes| usize::from(u16::from_le_bytes([bytes[0], bytes[1]])))
+            .and_then(|length| data.get(at + 30..at + 30 + length))
+            .is_some_and(|stored| stored == name.as_bytes())
+    };
+    // The first entry of some archives has only its signature damaged.
+    if named(0) {
+        return Some(0);
+    }
+    (0..data.len().saturating_sub(30)).find(|at| data[*at..].starts_with(&signature) && named(*at))
+}
+
 impl Entry {
     /// The final path component in lower case, which is how skin files are
     /// looked up: Winamp ran on a case-insensitive file system, and skins
@@ -119,15 +135,20 @@ impl<'a> Archive<'a> {
             return Err(ZipError::TooLarge(entry.name.clone()));
         }
         let data = self.data;
-        let at = entry.header_offset;
-        if u32_at(data, at)? != LOCAL_HEADER {
-            return Err(ZipError::NotAnArchive);
+        let mut at = entry.header_offset;
+        if u32_at(data, at).ok() != Some(LOCAL_HEADER) {
+            // Some tools wrote wrong offsets into the central directory;
+            // the entry is still in the file, under its own name.
+            at = find_local_header(data, &entry.name).ok_or(ZipError::NotAnArchive)?;
         }
         let name_len = usize::from(u16_at(data, at + 26)?);
         let extra_len = usize::from(u16_at(data, at + 28)?);
         let raw = slice(data, at + 30 + name_len + extra_len, entry.compressed_size)?;
         match entry.method {
-            STORED => Ok(raw.to_vec()),
+            // A stored entry is its own size; a larger one would slip past
+            // the limit on what an entry says it holds.
+            STORED if entry.compressed_size == entry.size => Ok(raw.to_vec()),
+            STORED => Err(ZipError::TooLarge(entry.name.clone())),
             DEFLATED => {
                 let mut out = Vec::with_capacity(entry.size);
                 flate2::read::DeflateDecoder::new(raw)
@@ -139,6 +160,47 @@ impl<'a> Archive<'a> {
             _ => Err(ZipError::Unsupported(entry.name.clone())),
         }
     }
+}
+
+/// The lower-case file names in the archive at `path`, read from its central
+/// directory alone: the end of the file, not every entry's bytes, so a
+/// listing of the skins folder stays cheap.
+pub fn file_names(path: &std::path::Path) -> Result<Vec<String>, ZipError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let unreadable = |_| ZipError::NotAnArchive;
+    let mut file = std::fs::File::open(path).map_err(unreadable)?;
+    let length = file.metadata().map_err(unreadable)?.len();
+    let tail_start = length.saturating_sub((END_RECORD_LEN + MAX_COMMENT_LEN) as u64);
+    file.seek(SeekFrom::Start(tail_start)).map_err(unreadable)?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).map_err(unreadable)?;
+    let end = find_end_record(&tail).ok_or(ZipError::NotAnArchive)?;
+    let count = usize::from(u16_at(&tail, end + 10)?);
+    let size = u64::from(u32_at(&tail, end + 12)?);
+    let offset = u64::from(u32_at(&tail, end + 16)?);
+    if offset.checked_add(size).is_none_or(|stop| stop > length) || size > ENTRY_LIMIT as u64 {
+        return Err(ZipError::Truncated);
+    }
+    file.seek(SeekFrom::Start(offset)).map_err(unreadable)?;
+    let mut directory = vec![0; size as usize];
+    file.read_exact(&mut directory).map_err(unreadable)?;
+    let mut names = Vec::with_capacity(count);
+    let mut cursor = 0;
+    for _ in 0..count {
+        if u32_at(&directory, cursor)? != CENTRAL_HEADER {
+            return Err(ZipError::NotAnArchive);
+        }
+        let name_len = usize::from(u16_at(&directory, cursor + 28)?);
+        let extra_len = usize::from(u16_at(&directory, cursor + 30)?);
+        let comment_len = usize::from(u16_at(&directory, cursor + 32)?);
+        let name = String::from_utf8_lossy(slice(&directory, cursor + 46, name_len)?);
+        if !name.ends_with(['/', '\\']) {
+            let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+            names.push(base.to_ascii_lowercase());
+        }
+        cursor += 46 + name_len + extra_len + comment_len;
+    }
+    Ok(names)
 }
 
 /// The end-of-central-directory record sits at the very end, behind an
@@ -289,6 +351,18 @@ mod tests {
         assert!(matches!(
             parsed.read(&parsed.entries()[0]),
             Err(ZipError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn a_stored_entry_larger_than_it_says_is_refused() {
+        let mut archive = write(&[("main.bmp", &[7u8; 300], false)]);
+        let directory = directory_offset(&archive);
+        archive[directory + 24..directory + 28].copy_from_slice(&10u32.to_le_bytes());
+        let parsed = Archive::parse(&archive).unwrap();
+        assert!(matches!(
+            parsed.read(&parsed.entries()[0]),
+            Err(ZipError::TooLarge(name)) if name == "main.bmp"
         ));
     }
 

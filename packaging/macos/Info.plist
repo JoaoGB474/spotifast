@@ -13,10 +13,13 @@
     <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSLocalNetworkUsageDescription</key><string>Find Spotify Connect speakers on your local network.</string>
+    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+    <key>NSLocalNetworkUsageDescription</key><string>Find Spotify Connect and Google Cast speakers on your local network.</string>
+    <key>NSAudioCaptureUsageDescription</key><string>Process Spotifast's Soloist player for the equalizer and music visualizers. Audio is not recorded or saved.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_spotify-connect._tcp</string>
+        <string>_googlecast._tcp</string>
     </array>
     <!-- Spotify links (spotify:track:…) open in Spotifast; src/mac_links.rs
          takes them. Launch Services notes this when the app is first opened. -->

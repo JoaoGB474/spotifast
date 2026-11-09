@@ -37,9 +37,17 @@ never becomes the beginning. This keeps the full Spotify playlist context;
 the app does not replace it with a shortened list of loaded songs. A request
 waiting for local playback to reconnect keeps the song chosen at the click.
 
-Sorted and filtered views omit unavailable songs and local files from their
-playback requests. The displayed rows keep their positions, and selecting a
-repeated song starts that occurrence. A filtered playlist or Liked Songs view
+Sorted and filtered views omit unavailable songs, and local files the local
+files folder does not hold, from their playback requests. The displayed rows keep their positions, and selecting a
+repeated song starts that occurrence. In a playlist's original order, a song
+that appears more than once among the loaded rows starts at the chosen copy's
+playlist position, provided the rows load from the beginning and no missing
+or local entry comes before it; otherwise it starts by name, which plays the
+first copy. A song started from a row marks only that row as playing and
+loading; other copies in the same list look like ordinary rows until another
+song plays. Another playlist that also holds the playing song shows it as an
+ordinary row, since the song is not playing from there. A filtered playlist or
+Liked Songs view
 plays its matching songs in displayed order, including duplicates. An empty or entirely
 unplayable view disables Play instead of starting the unfiltered context.
 
@@ -67,10 +75,31 @@ not consume a queue row or restore an older queue saved on this computer.
 1. **The list shows the play order.** The top row plays next, followed by the
    rows below it.
 
+   Spotify pads a short queue by going round it again, back to the playing
+   song, even with Repeat off. With Repeat off, Spotifast leaves out the
+   rows from where the list comes back round, so a song started on its own,
+   as a Recent row starts it, is not listed again under itself. Near the end
+   of an album, Spotify may go round to the album's first song without
+   showing where the album ends, so a few rows that will not play can stay.
+
 2. **Add to queue adds a song to your part of the queue.** It goes after
    the songs you queued earlier and before the playlist's songs. Queue
    the same song twice and it plays twice. A double-click only counts
    once.
+
+   **Play next** puts a song, or a selection of songs in displayed order,
+   at the front of **Playing next**, before the songs already queued. It
+   leaves the current song playing and keeps repeated songs as separate
+   entries. Right-click a song or selection to find it beside **Add to queue**.
+   It is enabled only while this computer is the active player, including
+   when paused. Spotify does not let Spotifast insert at the front of another
+   device's queue.
+
+   A local file from a playlist queues like any other song, but only while
+   this computer is the active player and the local files folder holds it:
+   Spotify's queue refuses local files, so this computer's player queues
+   them itself. Otherwise **Add to queue** and **Play next** are disabled
+   for it, and a selection queues its other songs.
 
    Since 0.9.0, an album's **Add to queue** adds its playable songs
    in album order, including repeated songs. This also works for singles and
@@ -116,7 +145,13 @@ not consume a queue row or restore an older queue saved on this computer.
    promptly without waiting for the song to finish.
 
 9. **Closing the app keeps the queue.** Spotifast saves it locally. When you
-   resume the last song, it restores your queued songs and playlist position.
+   resume the last song, it restores your queued songs and playlist position,
+   and the playlist carries on after that song, even when it was paused or
+   playing from a sorted view when you closed the app.
+
+   A song the playlist no longer holds, such as a recommendation that followed
+   its end, plays on its own at its saved position, followed by your queued
+   songs and, with Autoplay on, Spotify's recommendations for that song.
 
 10. **Old answers from Spotify are ignored.** Queue responses can be a few
     seconds late. Spotifast ignores stale responses and asks again. Your
@@ -139,3 +174,11 @@ counts once, and the notification reports only the rows actually added.
     target: it plays from the current context, not from a list Spotifast
     can rewrite. While *Playing next* is empty, drop the song on the player
     bar's Queue button instead.
+
+12. **A song you queued can be removed on its own, only on this
+    computer.** Right-click a row under *Playing next*, or open its **…**
+    menu, and choose **Remove from queue**. Only that row leaves: other
+    copies of the song stay, and so does *Next up*. Like a move, this
+    rewrites the queue by clearing it and re-adding the rest, so it is
+    offered only while this computer is the active player. *Next up* rows
+    have no such entry; they play from the current context.

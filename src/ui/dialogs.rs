@@ -11,6 +11,10 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(dialog) = app.dialog.clone() else {
         return;
     };
+    if let Dialog::CoverArt { url, shown, title } = &dialog {
+        cover_art(app, ctx, url, shown.as_deref(), title);
+        return;
+    }
     let palette = app.palette;
     let locale = app.locale;
     let frame = Frame::new()
@@ -34,23 +38,19 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.set_width(420.0);
             match dialog {
+                // Drawn by cover_art above.
+                Dialog::CoverArt { .. } => {}
                 Dialog::PersonalAppIntro => {
-                    theme::text(ui, gettext(locale, "Spend less time waiting for Spotify"), theme::bold(20.0), palette.text);
+                    theme::text(ui, gettext(locale, "Register Spotifast with Spotify"), theme::bold(20.0), palette.text);
                     ui.add_space(12.0);
-                    for text in [
-                        gettext(locale, "Spotifast's default connection shares Spotify's request limit with other listeners. When it gets busy, loading music and using playback controls can take longer."),
-                        gettext(locale, "Your Premium account lets you create a free personal Spotify app. Connect it here to give supported requests your own allowance. Some pages still use the shared connection."),
-                        gettext(locale, "Setup takes a few minutes. You can also find it later in Settings under Personal Spotify app."),
-                    ] {
-                        ui.add(egui::Label::new(egui::RichText::new(text).font(theme::regular(14.0)).color(palette.secondary)).wrap());
-                        ui.add_space(10.0);
-                    }
+                    ui.add(egui::Label::new(egui::RichText::new(gettext(locale, "You're on the shared sign-in Spotifast used before. Spotifast no longer offers it, and Spotify can stop accepting it at any time. Register Spotifast so nothing stops your music. It takes about two minutes.")).font(theme::regular(14.0)).color(palette.secondary)).wrap());
+                    ui.add_space(10.0);
                     ui.add_space(8.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if theme::pill_button(ui, &palette, &gettext(locale, "Set up personal app"), true).clicked() {
+                    buttons(ui, |ui| {
+                        if theme::pill_button(ui, &palette, &gettext(locale, "Register Spotifast"), true).clicked() {
                             app.actions.push(Action::OpenPersonalAppSetup);
                         }
-                        if theme::pill_button(ui, &palette, &gettext(locale, "Keep shared app"), false).clicked() {
+                        if theme::pill_button(ui, &palette, &gettext(locale, "Not now"), false).clicked() {
                             app.actions.push(Action::CloseDialog);
                         }
                     });
@@ -86,7 +86,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         .wrap(),
                     );
                     ui.add_space(20.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    buttons(ui, |ui| {
                         if theme::pill_button(
                             ui,
                             &palette,
@@ -135,7 +135,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         .wrap(),
                     );
                     ui.add_space(20.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    buttons(ui, |ui| {
                         if theme::pill_button(ui, &palette, &gettext(locale, "Add anyway"), true).clicked() {
                             app.actions.push(Action::ConfirmAddToPlaylist {
                                 playlist_id: playlist_id.clone(),
@@ -192,7 +192,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         },
                     );
                     ui.add_space(16.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    buttons(ui, |ui| {
                         if theme::pill_button(ui, &palette, &gettext(locale, "Done"), true).clicked() {
                             app.actions.push(Action::CloseDialog);
                         }
@@ -218,7 +218,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         .wrap(),
                     );
                     ui.add_space(20.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    buttons(ui, |ui| {
                         if theme::pill_button(ui, &palette, &gettext(locale, "OK"), true).clicked() {
                             app.actions.push(Action::CloseDialog);
                         }
@@ -230,6 +230,15 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     if response.should_close() {
         app.actions.push(Action::CloseDialog);
     }
+}
+
+// Keep button rows content-sized when the shared modal area last held a taller dialog.
+fn buttons(ui: &mut egui::Ui, add_buttons: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+        Layout::right_to_left(Align::Center),
+        add_buttons,
+    );
 }
 
 fn duplicate_message(
@@ -399,7 +408,7 @@ fn create_playlist(app: &mut App, ui: &mut egui::Ui) {
     let name_value = name.trim().to_string();
     let public_value = *public;
     let uris = add_uris.clone();
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+    buttons(ui, |ui| {
         if busy {
             theme::spinner(ui, 18.0, palette.accent);
         } else {
@@ -460,12 +469,14 @@ fn edit_playlist(app: &mut App, ui: &mut egui::Ui) {
                         .include_bytes(selected.uri.clone(), selected.jpeg.clone());
                     ui.add(
                         egui::Image::new(selected.uri.clone())
+                            .texture_options(crate::images::COVER_TEXTURE)
                             .fit_to_exact_size(egui::vec2(72.0, 72.0))
                             .alt_text(gettext(locale, "Selected playlist cover")),
                     );
                 } else if let Some(url) = &existing_image {
                     ui.add(
                         egui::Image::new(url)
+                            .texture_options(crate::images::COVER_TEXTURE)
                             .fit_to_exact_size(egui::vec2(72.0, 72.0))
                             .alt_text(gettext(locale, "Current playlist cover")),
                     );
@@ -578,7 +589,7 @@ fn edit_playlist(app: &mut App, ui: &mut egui::Ui) {
     let name_value = name.trim().to_string();
     let description_value = description.trim().to_string();
     let public_value = *public;
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+    buttons(ui, |ui| {
         if busy {
             theme::spinner(ui, 18.0, palette.accent);
         } else {
@@ -646,5 +657,65 @@ mod tests {
             message,
             "“Honey” is already in “The best music ever”. Add them anyway?"
         );
+    }
+}
+
+/// A page's header cover, as large as the window allows, over the dimmed
+/// page. A click anywhere, on the cover or around it, or Esc closes it.
+fn cover_art(app: &mut App, ctx: &egui::Context, url: &str, shown: Option<&str>, title: &str) {
+    let palette = app.palette;
+    let side = cover_art_side(ctx.content_rect().size());
+    let response = egui::Modal::new(egui::Id::new("cover-art"))
+        .frame(Frame::new().shadow(egui::epaint::Shadow {
+            offset: [0, 10],
+            blur: 40,
+            spread: 0,
+            color: palette.shadow,
+        }))
+        .backdrop_color(egui::Color32::from_black_alpha(if palette.dark {
+            190
+        } else {
+            150
+        }))
+        .show(ctx, |ui| {
+            let (rect, cover) =
+                ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::click());
+            cover.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, title));
+            super::widgets::paint_cover_with_thumbnail(
+                ui,
+                &palette,
+                super::widgets::CoverSources {
+                    requested: Some(url),
+                    previous: shown,
+                    ..Default::default()
+                },
+                rect,
+                8.0,
+                theme::Icon::Music,
+                Some(app.backend.art()),
+            );
+            cover.clicked()
+        });
+    app.dialog_rect = Some(response.response.rect);
+    if response.inner || response.should_close() {
+        app.actions.push(Action::CloseDialog);
+    }
+}
+
+/// The enlarged cover's side: as much of the window as leaves a margin
+/// around it, and no larger than Spotify's largest artwork, 640 pixels wide.
+fn cover_art_side(window: egui::Vec2) -> f32 {
+    (window.x.min(window.y) - 96.0).clamp(120.0, 640.0)
+}
+
+#[cfg(test)]
+mod cover_art_tests {
+    use super::cover_art_side;
+
+    #[test]
+    fn the_enlarged_cover_fits_the_window_up_to_spotifys_largest_artwork() {
+        assert_eq!(cover_art_side(egui::vec2(1240.0, 800.0)), 640.0);
+        assert_eq!(cover_art_side(egui::vec2(760.0, 620.0)), 524.0);
+        assert_eq!(cover_art_side(egui::vec2(100.0, 100.0)), 120.0);
     }
 }

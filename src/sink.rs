@@ -8,14 +8,18 @@
 //!
 //! fastframe-audio owns the device stream: it pauses with playback, so a
 //! paused player costs no audio work (#636), follows the system's default
-//! output and reopens after a failure. rodio's mixer and queue fill it.
+//! output and reopens after a failure. rodio's mixer and queue fill it. It
+//! is the only output on every platform; on Linux it plays through cpal's
+//! default host, PipeWire, then PulseAudio, then ALSA.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fastframe_audio::{Buffer, BufferSize, Maintained, OutputOptions, Render};
+use fastframe_audio::{
+    Buffer, BufferSize, DeviceId, DeviceInfo, Maintained, OutputOptions, Reason, Render,
+};
 use librespot_playback::audio_backend::{Sink, SinkError, SinkResult};
 use librespot_playback::convert::Converter;
 use librespot_playback::decoder::AudioPacket;
@@ -26,31 +30,53 @@ use rodio::Source;
 
 use crate::resample::Resampler;
 
-/// The backend name Settings uses for this sink.
-pub const NAME: &str = "rodio";
-
 /// Told about output failures, with a message fit for the interface.
 pub type ErrorHook = Arc<dyn Fn(String) + Send + Sync>;
+
+/// Told, with the saved name, the id of the device an older Spotifast saved
+/// by its name, once the output has opened on it, so the setting can hold
+/// the id from then on.
+pub type DeviceHook = Arc<dyn Fn(String, DeviceId) + Send + Sync>;
 
 /// Reported when the system has no audio output at all. The interface
 /// recognises it and shows it in the user's language.
 pub const NO_DEVICE: &str =
     "No audio output device was found. Connect or enable one, then press play again.";
 
-/// Opens the output: the device by name, else the default.
+/// Opens the output: the saved device, else the default.
 type Opener = fn(Option<&str>, u32, &AudioControl) -> Result<Output, OpenError>;
 
-/// Maximum queued rodio chunks before `write` blocks, about 200 ms of audio.
-const QUEUE_LIMIT: usize = 12;
+/// How much sound `write` queues before it blocks. Measured in time, not in
+/// chunks: librespot's packets hold as little as 4 ms, so a dozen of them
+/// could be less than one PipeWire quantum (2048 frames, 43 ms), and every
+/// callback would drain the queue.
+const QUEUE_AHEAD: Duration = Duration::from_millis(200);
+
+/// How much of a full queue rodio plays before `write` is woken to top it
+/// up. librespot's packets hold 4 to 13 ms of sound, so polling every 10 ms
+/// (or waking for every packet) kept the decoder thread awake about 100
+/// times a second; this wakes it about 30 times.
+const REFILL: Duration = Duration::from_millis(20);
+
+/// Longest `write` waits for rodio before it looks at the device again: a
+/// stream that has failed or stopped playing finishes no chunk to wake it.
+const QUEUE_WAIT: Duration = Duration::from_millis(50);
 
 /// Maximum time `stop` waits for the queue to drain.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Length of each side of an interrupted-track fade.
-const INTERRUPT_FADE: Duration = Duration::from_millis(10);
+const INTERRUPT_FADE: Duration = Duration::from_millis(50);
 
-/// How long Play takes to come up, and Pause to go down.
-const TRANSPORT_FADE: Duration = Duration::from_millis(250);
+/// How long Play takes to come up, and Pause and Stop to go down.
+const TRANSPORT_FADE: Duration = Duration::from_millis(50);
+
+/// Smooths slider and mute changes at the device's sample rate.
+const VOLUME_RAMP: Duration = Duration::from_millis(30);
+
+/// The least time between two logs of the device's underruns, so a stretch
+/// of them under load leaves a line now and then, not one per gap.
+const UNDERRUN_LOG_EVERY: Duration = Duration::from_secs(10);
 
 /// Default Windows device buffer length in milliseconds.
 ///
@@ -75,6 +101,7 @@ pub struct AudioControl {
     target: Mutex<AudioTarget>,
     waiting_for_track: AtomicBool,
     reset_output: AtomicBool,
+    reset_processing: AtomicBool,
     buffer_ms: u32,
 }
 
@@ -90,6 +117,7 @@ impl AudioControl {
             target: Mutex::new(AudioTarget::default()),
             waiting_for_track: AtomicBool::new(false),
             reset_output: AtomicBool::new(false),
+            reset_processing: AtomicBool::new(false),
             buffer_ms: buffer_ms.clamp(*BUFFER_MS_RANGE.start(), *BUFFER_MS_RANGE.end()),
         })
     }
@@ -105,6 +133,7 @@ impl AudioControl {
                     sink.stop();
                 }
                 self.reset_output.store(true, Ordering::SeqCst);
+                self.reset_processing.store(true, Ordering::SeqCst);
                 // Previous can rewind the current track after interrupting
                 // it. Release that gate, but never close it for a seek:
                 // the decoder is already sending audio from the new position.
@@ -138,6 +167,7 @@ impl AudioControl {
             sink.stop();
         }
         self.reset_output.store(true, Ordering::SeqCst);
+        self.reset_processing.store(true, Ordering::SeqCst);
     }
 
     /// Opens the write gate once librespot has left the old decoder behind.
@@ -152,6 +182,12 @@ impl AudioControl {
 
     fn waiting_for_track(&self) -> bool {
         self.waiting_for_track.load(Ordering::SeqCst)
+    }
+
+    /// The processing wrapper owns a separate reset from the output queue.
+    /// Keep it pending while old decoder packets are still being discarded.
+    pub(crate) fn take_processing_reset(&self) -> bool {
+        !self.waiting_for_track() && self.reset_processing.swap(false, Ordering::SeqCst)
     }
 
     fn take_reset(&self) -> bool {
@@ -170,6 +206,9 @@ impl AudioControl {
 struct Queued {
     appended: AtomicU64,
     consumed: AtomicU64,
+    /// While `write` waits for room, the queued level at or below which it
+    /// is woken; zero while nothing waits.
+    wake_at: AtomicU64,
 }
 
 impl Queued {
@@ -177,6 +216,7 @@ impl Queued {
         Arc::new(Self {
             appended: AtomicU64::new(0),
             consumed: AtomicU64::new(0),
+            wake_at: AtomicU64::new(0),
         })
     }
 
@@ -185,6 +225,36 @@ impl Queued {
         self.appended
             .load(Ordering::Relaxed)
             .saturating_sub(self.consumed.load(Ordering::Relaxed))
+    }
+
+    /// Sleeps the writer until rodio has played `refill` frames of what is
+    /// queued, or `QUEUE_WAIT` has passed.
+    fn wait_for_room(&self, refill: u64) {
+        let wake_at = self.frames().saturating_sub(refill).max(1);
+        self.wake_at.store(wake_at, Ordering::Relaxed);
+        // Pairs with the fence in `drained`: either the chunk that reaches
+        // the level sees it, or this sees that chunk already gone.
+        fence(Ordering::SeqCst);
+        if self.frames() > wake_at {
+            thread::park_timeout(QUEUE_WAIT);
+        }
+        self.wake_at.store(0, Ordering::Relaxed);
+    }
+
+    /// rodio has finished with a chunk: wakes `writer` once the queue has
+    /// drained to the level it waits for, and only then.
+    fn drained(&self, writer: &thread::Thread) {
+        fence(Ordering::SeqCst);
+        let wake_at = self.wake_at.load(Ordering::Relaxed);
+        if wake_at != 0
+            && self.frames() <= wake_at
+            && self
+                .wake_at
+                .compare_exchange(wake_at, 0, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            writer.unpark();
+        }
     }
 }
 
@@ -300,6 +370,9 @@ struct TransitionSource {
     remaining: u32,
     channel: usize,
     gain: f32,
+    /// The thread that queued this chunk, which may be waiting in `write`
+    /// for room.
+    writer: thread::Thread,
 }
 
 impl TransitionSource {
@@ -318,6 +391,7 @@ impl TransitionSource {
             remaining: frames,
             channel: 0,
             gain: 1.0,
+            writer: thread::current(),
         }
     }
 }
@@ -326,10 +400,14 @@ impl Drop for TransitionSource {
     /// rodio drops whole sources on `stop`, which every track change does, so
     /// a chunk can end without being played. Settling up here is what stops
     /// the count drifting away from the queue it is meant to describe.
+    ///
+    /// rodio drops a chunk once it has taken it out of the sink's count, so
+    /// this is also where a writer waiting for room learns of it.
     fn drop(&mut self) {
         self.queued
             .consumed
             .fetch_add(u64::from(self.remaining), Ordering::Relaxed);
+        self.queued.drained(&self.writer);
     }
 }
 
@@ -373,10 +451,12 @@ impl Source for TransitionSource {
 }
 
 pub struct RodioSink {
-    /// The output device name from Settings; `None` means the default.
+    /// The output device from Settings, an id or an older build's name
+    /// (see [`Saved`]); `None` means the default.
     device: Option<String>,
     output: Option<Output>,
     on_error: ErrorHook,
+    on_device: DeviceHook,
     /// Player volume, applied at output so changes affect queued audio.
     volume: Box<dyn VolumeGetter + Send>,
     applied_volume: f32,
@@ -389,6 +469,7 @@ pub struct RodioSink {
 
 struct Output {
     device: fastframe_audio::Output<MixerRender>,
+    volume: Arc<AtomicU32>,
     /// Where a mixer made for a new stream format waits for this thread.
     made: MixerSlot,
     mixer: rodio::mixer::Mixer,
@@ -406,6 +487,39 @@ struct Output {
     /// Whether this track has supplied audio since its last stop.
     fed: bool,
     last_write: Option<Instant>,
+    /// The gaps the device played, as last logged.
+    underruns: Underruns,
+    /// The name this output was opened by and the id of the device it found
+    /// there, until they are handed to the setting.
+    saved_as: Option<(String, DeviceId)>,
+}
+
+/// Which of the device's underruns have been logged. "audio queue ran dry"
+/// is this app being late to fill the queue; an underrun is the device
+/// playing silence because its callback came too late, so a log shows both.
+#[derive(Default)]
+struct Underruns {
+    logged: u64,
+    at: Option<Instant>,
+}
+
+impl Underruns {
+    /// The gaps to log now, out of `count` so far: only when it has grown,
+    /// and at most once every `UNDERRUN_LOG_EVERY`, holding the rest for the
+    /// next line.
+    fn take_new(&mut self, count: u64, now: Instant) -> Option<u64> {
+        if count <= self.logged
+            || self
+                .at
+                .is_some_and(|at| now.duration_since(at) < UNDERRUN_LOG_EVERY)
+        {
+            return None;
+        }
+        let new = count - self.logged;
+        self.logged = count;
+        self.at = Some(now);
+        Some(new)
+    }
 }
 
 impl Output {
@@ -432,8 +546,9 @@ impl Output {
     }
 
     /// Has the device ask for sound, reopening it if it failed, moved to a
-    /// new default output, or was let go after a long pause. Returns whether
-    /// the queue was replaced, which needs the volume set again.
+    /// new default output, stopped playing, or was let go after a long
+    /// pause. Returns whether the queue was replaced, which needs the volume
+    /// set again.
     fn run(&mut self, control: &AudioControl) -> Result<bool, OpenError> {
         self.device.resume();
         for error in self.device.take_errors() {
@@ -449,9 +564,22 @@ impl Output {
                 sample_rate,
                 reason,
                 ..
-            } => log::info!("audio output reopened ({reason:?}): {device} at {sample_rate} Hz"),
+            } => match reason {
+                // A stream can stop asking for sound without reporting an
+                // error, and then nothing would ever make room (#731).
+                Reason::Stalled => log::warn!(
+                    "the audio output stopped playing; opened it again: {device} at {sample_rate} Hz"
+                ),
+                Reason::Failed | Reason::DefaultChanged | Reason::Resumed => {
+                    log::info!("audio output reopened ({reason:?}): {device} at {sample_rate} Hz")
+                }
+            },
             Maintained::Failed(error) => return Err(error.into()),
             Maintained::Unchanged | Maintained::Released => {}
+        }
+        let count = self.device.clock().underruns();
+        if let Some(new) = self.underruns.take_new(count, Instant::now()) {
+            log::warn!("audio device underran {new} times; {count} since the output opened");
         }
         let made = self
             .made
@@ -482,6 +610,34 @@ type MadeMixer = (rodio::mixer::Mixer, u32);
 
 type MixerSlot = Arc<Mutex<Option<MadeMixer>>>;
 
+/// A linear gain ramp, shared by every channel of an output frame.
+#[derive(Default)]
+struct VolumeRamp {
+    current: f32,
+    target: f32,
+    remaining: u32,
+    sample_rate: u32,
+}
+
+impl VolumeRamp {
+    fn next_gain(&mut self, target: f32, sample_rate: u32) -> f32 {
+        if target != self.target || sample_rate != self.sample_rate {
+            self.target = target;
+            self.sample_rate = sample_rate;
+            self.remaining = fade_frames(sample_rate, VOLUME_RAMP);
+        }
+        let gain = self.current;
+        if self.remaining > 0 {
+            self.current += (self.target - self.current) / self.remaining as f32;
+            self.remaining -= 1;
+            if self.remaining == 0 {
+                self.current = self.target;
+            }
+        }
+        gain
+    }
+}
+
 /// Fills the device from rodio's mixer, or with silence before there is one.
 ///
 /// fastframe-audio configures it on the sink's thread whenever it opens a
@@ -489,6 +645,8 @@ type MixerSlot = Arc<Mutex<Option<MadeMixer>>>;
 /// reopen on another device carries on from the same sample; another rate or
 /// channel count gets a new mixer, which waits in `made` for the sink.
 struct MixerRender {
+    volume: Arc<AtomicU32>,
+    ramp: VolumeRamp,
     source: Option<rodio::mixer::MixerSource>,
     format: (u32, u16),
     made: MixerSlot,
@@ -511,8 +669,12 @@ impl Render for MixerRender {
     fn render(&mut self, out: &mut [f32]) {
         match &mut self.source {
             Some(source) => {
-                for sample in out {
-                    *sample = source.next().unwrap_or(0.0);
+                let target = f32::from_bits(self.volume.load(Ordering::Relaxed));
+                for frame in out.chunks_mut(usize::from(self.format.1).max(1)) {
+                    let gain = self.ramp.next_gain(target, self.format.0);
+                    for sample in frame {
+                        *sample = source.next().unwrap_or(0.0) * gain;
+                    }
                 }
             }
             None => out.fill(0.0),
@@ -532,6 +694,7 @@ impl RodioSink {
             device,
             output: None,
             on_error,
+            on_device: Arc::new(|_, _| {}),
             volume,
             applied_volume: -1.0,
             buffer_ms,
@@ -540,18 +703,28 @@ impl RodioSink {
         }
     }
 
+    /// Tells `hook` the id of a device opened by an old saved name.
+    pub fn on_device(mut self, hook: DeviceHook) -> Self {
+        self.on_device = hook;
+        self
+    }
+
     fn apply_volume(&mut self) {
         let factor = self.volume.attenuation_factor() as f32;
         if let Some(output) = &self.output
             && factor != self.applied_volume
         {
-            output.sink.set_volume(factor);
+            output.volume.store(factor.to_bits(), Ordering::Relaxed);
             self.applied_volume = factor;
         }
     }
 
     /// Opens the output if it is not open, and has it ask for sound.
     fn open_if_needed(&mut self) -> Result<(), OpenError> {
+        // librespot's player thread decodes and queues every packet; ahead
+        // of ordinary work, a busy or swapping machine keeps it waiting less
+        // than the queue lasts (#88, #785). Once per thread, then free.
+        fastframe_audio::raise_feeder_priority();
         match &mut self.output {
             Some(output) => {
                 if output.run(&self.control)? {
@@ -559,11 +732,14 @@ impl RodioSink {
                 }
             }
             None => {
-                self.output = Some((self.open)(
-                    self.device.as_deref(),
-                    self.buffer_ms,
-                    &self.control,
-                )?);
+                let mut output =
+                    (self.open)(self.device.as_deref(), self.buffer_ms, &self.control)?;
+                if let Some((name, id)) = output.saved_as.take() {
+                    log::info!("the saved audio output {name:?} is now saved by its id");
+                    self.device = Some(id.as_str().to_string());
+                    (self.on_device)(name, id);
+                }
+                self.output = Some(output);
                 self.applied_volume = -1.0;
             }
         }
@@ -592,7 +768,6 @@ impl Sink for RodioSink {
     /// where librespot expects it, so playback stops with a message and
     /// the app stays up as a Connect remote.
     fn start(&mut self) -> SinkResult<()> {
-        take_precedence();
         if let Err(error) = self.open_if_needed() {
             log::debug!("audio output not open at start: {error}");
             return Ok(());
@@ -610,7 +785,7 @@ impl Sink for RodioSink {
         if let Some(output) = &mut self.output {
             // The drain below plays the queue out, so the ramp is cut to
             // what is in it. During steady playback that is the whole
-            // 250 ms; just after a seek or a track change it is whatever has
+            // 50 ms; just after a seek or a track change it is whatever has
             // been decoded since.
             output.transport.fade_out_over(output.queued.frames());
             let deadline = Instant::now() + DRAIN_TIMEOUT;
@@ -698,37 +873,113 @@ impl Sink for RodioSink {
         output.fed = true;
         output.last_write = Some(now);
         // Let rodio drain a little; without this the whole track would be
-        // decoded into memory at once.
-        while output.sink.len() > QUEUE_LIMIT {
-            if output.failed() {
-                let message = "The audio output stopped working".to_string();
-                (self.on_error)(message.clone());
-                return Err(SinkError::OnWrite(message));
+        // decoded into memory at once. A full queue sleeps until rodio has
+        // played `REFILL` of it, then is topped up in one go.
+        let refill = u64::from(output.sample_rate) * REFILL.as_millis() as u64 / 1_000;
+        while queue_is_full(output.queued.frames(), output.sample_rate) {
+            // Headphones that connect, a new default output, a device that
+            // went away or a stream that stopped asking for sound: the
+            // output moves to the one to use now and the music carries on.
+            // Only an output that will not open stops it.
+            match output.run(&self.control) {
+                Ok(replaced) if !output.failed() => {
+                    if replaced {
+                        self.applied_volume = -1.0;
+                    }
+                }
+                Ok(_) | Err(_) => {
+                    let message = "The audio output stopped working".to_string();
+                    (self.on_error)(message.clone());
+                    return Err(SinkError::OnWrite(message));
+                }
             }
-            thread::sleep(Duration::from_millis(10));
+            if !queue_is_full(output.queued.frames(), output.sample_rate) {
+                break;
+            }
+            output.queued.wait_for_room(refill);
         }
+        self.apply_volume();
         Ok(())
     }
 }
 
-/// Raises the Windows decoder thread one step above normal to prevent queued
-/// audio from running out under load (#88).
-///
-/// Linux requires rtkit; CoreAudio owns its real-time callback on macOS.
-#[cfg(windows)]
-fn take_precedence() {
-    use windows_sys::Win32::System::Threading::{
-        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
-    };
-    // SAFETY: the current thread's pseudo-handle needs no closing, and the
-    // call takes nothing else.
-    unsafe {
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-    }
+/// Whether `write` has queued `QUEUE_AHEAD` of sound at `sample_rate` and
+/// waits for rodio to play some before taking the next packet.
+fn queue_is_full(queued_frames: u64, sample_rate: u32) -> bool {
+    queued_frames > u64::from(sample_rate) * QUEUE_AHEAD.as_millis() as u64 / 1_000
 }
 
-#[cfg(not(windows))]
-fn take_precedence() {}
+/// What a saved `audio_device` opens, among the outputs listed now.
+///
+/// Spotifast saves the id `fastframe_audio::output_devices` gives (on Linux
+/// PipeWire's or PulseAudio's node name, the WASAPI endpoint id on Windows,
+/// the CoreAudio UID on macOS). Up to 0.13.3 it saved a name from
+/// `output_device_names` instead, which on Linux was usually one of ALSA's
+/// (`PipeWire Sound Server`, `Default ALSA Output (currently PipeWire Media
+/// Server)`, a card's name), or a PulseAudio sink with that backend.
+///
+/// An id a listed device has opens that device. Otherwise a name one still
+/// has opens it by that name, and its id is saved once it has opened there.
+/// Anything else plays through the system default, as if nothing had been
+/// chosen: no error, and the setting stays as it is until another choice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Saved {
+    Default,
+    Id(DeviceId),
+    Named { name: String, id: DeviceId },
+}
+
+impl Saved {
+    pub(crate) fn among(saved: Option<&str>, devices: &[DeviceInfo]) -> Self {
+        let Some(saved) = saved.map(str::trim).filter(|saved| !saved.is_empty()) else {
+            return Self::Default;
+        };
+        if let Some(device) = devices.iter().find(|device| device.id.as_str() == saved) {
+            return Self::Id(device.id.clone());
+        }
+        match devices.iter().find(|device| device.name == saved) {
+            Some(device) => Self::Named {
+                name: device.name.clone(),
+                id: device.id.clone(),
+            },
+            None => Self::Default,
+        }
+    }
+
+    /// Reads the saved device against the outputs there are now. Listing
+    /// asks the sound system, so this runs where opening the device does,
+    /// never on the UI thread; nothing is listed for the default.
+    fn now(saved: Option<&str>) -> Self {
+        let Some(saved) = saved.map(str::trim).filter(|saved| !saved.is_empty()) else {
+            return Self::Default;
+        };
+        match fastframe_audio::output_devices() {
+            Ok(devices) => {
+                let resolved = Self::among(Some(saved), &devices);
+                if resolved == Self::Default {
+                    log::info!(
+                        "the saved audio output {saved:?} is not here; playing through the default"
+                    );
+                }
+                resolved
+            }
+            // The output falls back to the default itself, with a warning,
+            // when the id matches nothing.
+            Err(error) => {
+                log::warn!("couldn't list audio outputs: {error}");
+                Self::Id(DeviceId::new(saved))
+            }
+        }
+    }
+
+    fn device(&self) -> fastframe_audio::Device {
+        match self {
+            Self::Default => fastframe_audio::Device::Default,
+            Self::Id(id) => fastframe_audio::Device::Id(id.clone()),
+            Self::Named { name, .. } => fastframe_audio::Device::Named(name.clone()),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 enum OpenError {
@@ -747,16 +998,26 @@ impl From<fastframe_audio::OpenError> for OpenError {
     }
 }
 
+/// The stream's name in the system's volume mixer, under the app's.
+const MEDIA_NAME: &str = "Spotify playback";
+
+/// Names Spotifast, with the desktop entry's icon, in the system's volume
+/// mixer (PipeWire and PulseAudio) for every output opened afterwards. Call
+/// once at startup, before any output is listed or opened.
+pub fn name_in_mixers() {
+    let _ = fastframe_audio::set_app_info(fastframe_audio::AppInfo {
+        name: "Spotifast".to_owned(),
+        icon: Some("spotifast".to_owned()),
+    });
+}
+
 /// What the output asks of the device: Spotify's stereo 44.1 kHz first, so
-/// nothing is converted, then whatever the device takes. A named device
-/// that has gone falls back to the default. The fixed buffer addresses
-/// Windows shared-mode underruns (#88); CoreAudio, ALSA, PulseAudio and
-/// PipeWire keep their proven driver-selected periods.
-fn output_options(preferred: Option<&str>, buffer_ms: u32) -> OutputOptions {
-    let device = match preferred.map(str::trim).filter(|name| !name.is_empty()) {
-        Some(name) => fastframe_audio::Device::Named(name.to_string()),
-        None => fastframe_audio::Device::Default,
-    };
+/// nothing is converted, then whatever the device takes. A device that has
+/// gone falls back to the default. The fixed buffer addresses Windows
+/// shared-mode underruns (#88); CoreAudio, PipeWire and ALSA keep their
+/// driver-selected periods, and PulseAudio gets fastframe-audio's 20 ms
+/// instead of its own two seconds.
+fn output_options(device: fastframe_audio::Device, buffer_ms: u32) -> OutputOptions {
     let buffer_ms = buffer_ms.clamp(*BUFFER_MS_RANGE.start(), *BUFFER_MS_RANGE.end());
     OutputOptions {
         device,
@@ -766,6 +1027,10 @@ fn output_options(preferred: Option<&str>, buffer_ms: u32) -> OutputOptions {
             buffer_ms,
         )))),
         follow_default: true,
+        // Fixed while the stream is open, so not the song title. No role:
+        // the sound server would share a role's remembered volume with
+        // every other app playing music.
+        media_name: Some(MEDIA_NAME.to_owned()),
         ..OutputOptions::default()
     }
 }
@@ -776,13 +1041,27 @@ fn open_output(
     control: &AudioControl,
 ) -> Result<Output, OpenError> {
     let made = MixerSlot::default();
+    let volume = Arc::new(AtomicU32::new(0.0f32.to_bits()));
     let render = MixerRender {
+        volume: Arc::clone(&volume),
+        ramp: VolumeRamp::default(),
         source: None,
         format: (0, 0),
         made: Arc::clone(&made),
     };
-    let device = fastframe_audio::Output::open(output_options(preferred, buffer_ms), render)?;
-    log::info!("audio output: {}", device.device_name());
+    let saved = Saved::now(preferred);
+    let device = fastframe_audio::Output::open(output_options(saved.device(), buffer_ms), render)?;
+    log::info!(
+        "audio output: {} through {}",
+        device.device_name(),
+        fastframe_audio::host()
+    );
+    // A device found by an old saved name, and not the default standing in
+    // for it, has its id saved from now on.
+    let saved_as = match saved {
+        Saved::Named { name, id } if *device.device_id() == id => Some((name, id)),
+        _ => None,
+    };
     // The open configured the renderer, which made the mixer.
     let (mixer, sample_rate) = made
         .lock()
@@ -791,6 +1070,7 @@ fn open_output(
         .ok_or(OpenError::NoDevice)?;
     let mut output = Output {
         device,
+        volume,
         made,
         sink: Arc::new(rodio::Sink::connect_new(&mixer)),
         mixer: mixer.clone(),
@@ -801,6 +1081,8 @@ fn open_output(
         queued: Queued::new(),
         fed: false,
         last_write: None,
+        underruns: Underruns::default(),
+        saved_as,
     };
     output.attach((mixer, sample_rate), control);
     Ok(output)
@@ -811,36 +1093,221 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    #[test]
+    fn underruns_are_logged_when_they_grow_at_most_every_ten_seconds() {
+        let start = Instant::now();
+        let mut underruns = Underruns::default();
+        assert_eq!(underruns.take_new(0, start), None);
+        assert_eq!(underruns.take_new(2, start), Some(2));
+        assert_eq!(underruns.take_new(2, start + Duration::from_secs(30)), None);
+        // More within ten seconds of the last line wait for the next one.
+        let soon = start + Duration::from_secs(31);
+        assert_eq!(underruns.take_new(3, soon), Some(1));
+        assert_eq!(underruns.take_new(5, soon + Duration::from_secs(9)), None);
+        assert_eq!(
+            underruns.take_new(6, soon + UNDERRUN_LOG_EVERY),
+            Some(3),
+            "the held gaps are counted in the next line"
+        );
+    }
+
+    #[test]
+    fn volume_changes_take_thirty_ms_at_each_output_rate() {
+        for rate in [44_100, 48_000, 96_000] {
+            let frames = rate * 30 / 1_000;
+            let mut ramp = VolumeRamp::default();
+            for target in [1.0, 0.25, 0.0, 0.8] {
+                let start = ramp.current;
+                for frame in 0..frames {
+                    let gain = ramp.next_gain(target, rate);
+                    let expected = start + (target - start) * frame as f32 / frames as f32;
+                    assert!((gain - expected).abs() < 0.0001);
+                }
+                assert_eq!(ramp.next_gain(target, rate), target);
+                assert_eq!(ramp.remaining, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn retargeting_volume_continues_from_the_current_gain() {
+        let mut ramp = VolumeRamp::default();
+        for _ in 0..480 {
+            ramp.next_gain(1.0, 48_000);
+        }
+        let current = ramp.current;
+        assert!(current > 0.0 && current < 1.0);
+        assert_eq!(ramp.next_gain(0.0, 48_000), current);
+        for _ in 1..1440 {
+            ramp.next_gain(0.0, 48_000);
+        }
+        assert_eq!(ramp.next_gain(0.0, 48_000), 0.0);
+    }
+
+    #[test]
+    fn rendered_volume_is_stereo_linked_and_spans_callbacks() {
+        let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let made = MixerSlot::default();
+        let mut render = MixerRender {
+            volume: Arc::clone(&volume),
+            ramp: VolumeRamp::default(),
+            source: None,
+            format: (0, 0),
+            made: Arc::clone(&made),
+        };
+        render.configure(48_000, 2);
+        let (mixer, _) = made.lock().unwrap().take().unwrap();
+        mixer.add(rodio::buffer::SamplesBuffer::new(
+            2,
+            48_000,
+            vec![1.0; 10_000],
+        ));
+        let mut rising = Vec::new();
+        for _ in 0..6 {
+            let mut block = [0.0; 480];
+            render.render(&mut block);
+            rising.extend(block);
+        }
+        assert_eq!(rising[0], 0.0);
+        assert!(rising.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(
+            rising
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|pair| pair[0] == pair[1])
+        );
+        let mut settled = [0.0; 2];
+        render.render(&mut settled);
+        assert_eq!(settled, [1.0; 2]);
+        volume.store(0.0f32.to_bits(), Ordering::Relaxed);
+        let mut falling = vec![0.0; 2882];
+        render.render(&mut falling);
+        assert_eq!(falling[0], 1.0);
+        assert_eq!(&falling[2880..], &[0.0; 2]);
+        assert!(falling.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert!(
+            falling
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|pair| pair[0] == pair[1])
+        );
+    }
     /// The buffer setting reaches the device on Windows only (#88), and a
     /// settings file with a wild number in it still opens a stream: the
     /// range is the range whoever wrote the file thought of.
     #[test]
     fn the_buffer_follows_the_setting_within_its_range() {
-        let buffer = |ms| output_options(None, ms).buffer;
+        let buffer = |ms| output_options(fastframe_audio::Device::Default, ms).buffer;
         let fixed = |ms| Buffer::FixedOnWindows(BufferSize::Duration(Duration::from_millis(ms)));
         assert_eq!(buffer(100), fixed(100));
         assert_eq!(buffer(0), fixed(u64::from(*BUFFER_MS_RANGE.start())));
         assert_eq!(buffer(100_000), fixed(u64::from(*BUFFER_MS_RANGE.end())));
     }
 
-    /// Spotify's own format is asked for first, so nothing is converted, and
-    /// a blank device name means the system's default.
+    /// Spotify's own format is asked for first, so nothing is converted.
     #[test]
     fn the_output_asks_for_spotifys_format_on_the_chosen_device() {
-        let options = output_options(Some("USB DAC"), DEFAULT_BUFFER_MS);
-        assert_eq!(
-            options.device,
-            fastframe_audio::Device::Named("USB DAC".into())
-        );
+        let id = fastframe_audio::Device::Id(DeviceId::new("usb-dac"));
+        let options = output_options(id.clone(), DEFAULT_BUFFER_MS);
+        assert_eq!(options.device, id);
         assert_eq!(options.sample_rate, Some(SAMPLE_RATE));
         assert_eq!(options.channels, NUM_CHANNELS as u16);
         assert!(options.follow_default);
-        for blank in [None, Some(""), Some("  ")] {
-            assert_eq!(
-                output_options(blank, DEFAULT_BUFFER_MS).device,
-                fastframe_audio::Device::Default
-            );
+    }
+
+    fn listed(id: &str, name: &str, is_default: bool) -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId::new(id),
+            name: name.into(),
+            is_default,
         }
+    }
+
+    /// The outputs PipeWire lists on a desktop with a USB DAC beside the
+    /// built-in card.
+    fn pipewire_outputs() -> Vec<DeviceInfo> {
+        vec![
+            listed(
+                "alsa_output.pci-0000_00_1f.3.analog-stereo",
+                "Built-in Audio Analog Stereo",
+                true,
+            ),
+            listed(
+                "alsa_output.usb-Topping_DX3_Pro-00.analog-stereo",
+                "DX3 Pro Analog Stereo",
+                false,
+            ),
+        ]
+    }
+
+    /// A saved id opens that device by its id.
+    #[test]
+    fn a_saved_id_opens_its_device() {
+        let id = "alsa_output.usb-Topping_DX3_Pro-00.analog-stereo";
+        let saved = Saved::among(Some(id), &pipewire_outputs());
+        assert_eq!(saved, Saved::Id(DeviceId::new(id)));
+        assert_eq!(
+            saved.device(),
+            fastframe_audio::Device::Id(DeviceId::new(id))
+        );
+        // Windows and macOS save theirs the same way.
+        let wasapi = "{0.0.0.00000000}.{6a1b0c4e-2f8d-4b8e-9c55-1d2e3f4a5b6c}";
+        let outputs = [listed(wasapi, "Speakers (Realtek(R) Audio)", true)];
+        assert_eq!(
+            Saved::among(Some(wasapi), &outputs),
+            Saved::Id(DeviceId::new(wasapi))
+        );
+    }
+
+    /// A name an older build saved opens the device that still has it, and
+    /// says which id to save.
+    #[test]
+    fn a_saved_name_a_device_still_has_opens_it_by_that_name() {
+        let saved = Saved::among(Some("DX3 Pro Analog Stereo"), &pipewire_outputs());
+        assert_eq!(
+            saved,
+            Saved::Named {
+                name: "DX3 Pro Analog Stereo".into(),
+                id: DeviceId::new("alsa_output.usb-Topping_DX3_Pro-00.analog-stereo"),
+            }
+        );
+        assert_eq!(
+            saved.device(),
+            fastframe_audio::Device::Named("DX3 Pro Analog Stereo".into())
+        );
+        // A CoreAudio name that became a UID.
+        let outputs = [listed("BuiltInSpeakerDevice", "MacBook Pro Speakers", true)];
+        assert!(matches!(
+            Saved::among(Some("MacBook Pro Speakers"), &outputs),
+            Saved::Named { .. }
+        ));
+    }
+
+    /// The names the ALSA host listed on Linux, which PipeWire's outputs do
+    /// not have, play through the default, as do blank and unplugged ones.
+    #[test]
+    fn an_old_alsa_name_or_a_gone_device_plays_the_default() {
+        for saved in [
+            "PipeWire Sound Server",
+            "Default ALSA Output (currently PipeWire Media Server)",
+            "PulseAudio Sound Server",
+            "HDA Intel PCH, ALC892 Analog",
+            "Discard all samples (playback) or generate zero samples (capture)",
+            "alsa_output.usb-unplugged.analog-stereo",
+            "",
+            "  ",
+        ] {
+            let resolved = Saved::among(Some(saved), &pipewire_outputs());
+            assert_eq!(resolved, Saved::Default, "{saved:?}");
+            assert_eq!(resolved.device(), fastframe_audio::Device::Default);
+        }
+        assert_eq!(Saved::among(None, &pipewire_outputs()), Saved::Default);
+        assert_eq!(
+            Saved::among(Some("DX3 Pro Analog Stereo"), &[]),
+            Saved::Default
+        );
     }
 
     /// A stream reopened in the format the mixer already plays keeps it, so
@@ -850,6 +1317,8 @@ mod tests {
     fn only_a_new_format_makes_a_new_mixer() {
         let made = MixerSlot::default();
         let mut render = MixerRender {
+            volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            ramp: VolumeRamp::default(),
             source: None,
             format: (0, 0),
             made: Arc::clone(&made),
@@ -1103,7 +1572,7 @@ mod tests {
             librespot_core::SpotifyUri::from_uri("spotify:track:14XWXWv5FoCbFzLksawpEe").unwrap();
         let item = AudioItem {
             track_id: track_id.clone(),
-            uri: track_id.to_uri().unwrap(),
+            uri: track_id.to_uri(),
             files: Default::default(),
             name: "Next song".into(),
             covers: vec![],
@@ -1256,7 +1725,7 @@ mod tests {
 
     #[test]
     fn a_short_queue_still_gets_a_whole_ramp() {
-        let left = 60;
+        let left = 20;
         assert!(left < fade_frames(RATE, TRANSPORT_FADE));
 
         let transport = Envelope::open(RATE, TRANSPORT_FADE);
@@ -1270,6 +1739,19 @@ mod tests {
         let transport = Envelope::open(RATE, TRANSPORT_FADE);
         transport.fade_out_over(u64::from(nominal) * 10);
         falls_silent_after(&transport, nominal);
+    }
+
+    /// A dozen of librespot's shortest packets (4 ms each) are less than one
+    /// 43 ms PipeWire quantum, so a queue limited by count ran dry on every
+    /// callback; the limit is time.
+    #[test]
+    fn the_queue_holds_time_not_a_count_of_packets() {
+        let short_packet = 176; // 4 ms at 44.1 kHz
+        assert!(!queue_is_full(12 * short_packet, 44_100));
+        assert!(!queue_is_full(8_820, 44_100), "200 ms is the most it holds");
+        assert!(queue_is_full(8_821, 44_100));
+        assert!(!queue_is_full(9_600, 48_000));
+        assert!(queue_is_full(9_601, 48_000));
     }
 
     #[test]
@@ -1293,5 +1775,46 @@ mod tests {
 
         drop(chunk(40, &interrupt, &transport, &queued));
         assert_eq!(queued.frames(), 0);
+    }
+
+    /// A writer waiting for room sleeps through the chunks that leave the
+    /// queue above its level, and the one that reaches it wakes the writer,
+    /// once. Polling instead woke the decoder thread every 10 ms.
+    #[test]
+    fn a_waiting_writer_wakes_once_the_queue_has_drained_enough() {
+        let queued = Queued::new();
+        let (interrupt, transport) = wide_open();
+        let mut chunks: Vec<_> = (0..4)
+            .map(|_| chunk(10, &interrupt, &transport, &queued))
+            .collect();
+        queued.wake_at.store(20, Ordering::SeqCst);
+
+        drop(chunks.remove(0));
+        assert_eq!(queued.frames(), 30);
+        assert_eq!(queued.wake_at.load(Ordering::SeqCst), 20, "still asleep");
+
+        drop(chunks.remove(0));
+        assert_eq!(queued.wake_at.load(Ordering::SeqCst), 0, "woken, once");
+        // The chunks were queued from this thread, so the wake is its own:
+        // the token is waiting, and parking returns at once.
+        let started = Instant::now();
+        thread::park_timeout(Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        drop(chunks);
+        assert_eq!(queued.frames(), 0);
+    }
+
+    /// A stream that has stopped consuming finishes no chunk, so the wait
+    /// gives up by itself and `write` gets to have the device maintained,
+    /// which reopens a stream that stopped playing (Reason::Stalled).
+    #[test]
+    fn waiting_for_room_gives_up_when_nothing_plays() {
+        let queued = Queued::new();
+        queued.appended.store(1_000, Ordering::SeqCst);
+        let started = Instant::now();
+        queued.wait_for_room(100);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(queued.wake_at.load(Ordering::SeqCst), 0);
     }
 }

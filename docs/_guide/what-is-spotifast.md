@@ -43,20 +43,20 @@ cannot play music through Spotifast on this computer or another device.
 
 <a id="account-safety"></a>
 
-## Will my Spotify account get banned?
+## Is it safe for my Spotify account?
 
-**We're not aware of any confirmed account bans caused by normal Premium
-listening through Spotifast or other players using the same playback
-software, [librespot](https://github.com/librespot-org/librespot).**
+[Soloist](/soloist/) is Spotify's official player for third-party apps, so
+with Soloist you're listening the way Spotify provides for.
 
-Spotifast plays music using your Spotify Premium subscription. It does not
-unlock Premium for Free accounts, remove ads, export songs, or bypass
-Spotify's copy protection. You sign in on Spotify's own website, and
-Spotifast never receives your Spotify password.
+Spotifast never receives your Spotify password: you sign in on Spotify's own
+website. It doesn't unlock Premium, remove ads, export songs, or bypass
+Spotify's copy protection.
 
-Spotifast is independent of Spotify, so we cannot guarantee Spotify's future
-decisions. Changes at Spotify can also temporarily interrupt playback until
-the app is updated.
+The built-in player uses
+[librespot](https://github.com/librespot-org/librespot) and stays available.
+We know of no confirmed bans from normal Premium listening with it, though
+Spotify sometimes refuses it, which shows up as an
+[audio key error](/troubleshooting/#audio-key).
 
 ## What it does not do
 
@@ -64,16 +64,17 @@ Spotifast has a limited scope:
 
 - **Playing needs Spotify Premium**, both on this computer and when
   controlling another device. Free accounts can browse and search.
-- Setup asks for two Spotify approvals: one to access your library, another
+- Built-in playback setup asks for two Spotify approvals: one to access your library, another
   to play music on this computer. [How it connects](/how-it-connects/)
   explains why.
-- **Spotify Lossless is not available.** Playback supports up to 320 kbps.
-  The playback software Spotifast uses, librespot, cannot play Spotify's
-  protected lossless audio. Spotifast will reconsider this if
-  [librespot adds lawful support](https://github.com/librespot-org/librespot/issues/1583).
+- **The built-in player supports up to 320 kbps.** librespot cannot play
+  Spotify Lossless. Since 0.15, Spotifast also offers the optional
+  [Soloist player](/soloist/), which uses Spotify's own implementation with
+  lossless support. Soloist does not report the delivered audio format.
+  Spotifast's [private audio routes](/soloist/#playback-and-current-limits)
+  provide EQ and visualizers on Linux and Mac, and visualizers on Windows.
 - No video podcasts or social features.
-- Spotifast is an **unofficial** app. Changes at Spotify can temporarily
-  break features until Spotifast is updated.
+- Changes at Spotify can briefly interrupt features until an update.
 
 Bug reports should include `spotifast.log`, `panic.log` after a crash, and
 steps to reproduce the problem. See the
@@ -84,16 +85,16 @@ help explain why, even when you started the app from your desktop.
 
 ## Prior art
 
-Spotifast is written in Rust, with [egui](https://github.com/emilk/egui) for
-its interface and [librespot](https://github.com/librespot-org/librespot) for
-Spotify playback. It takes inspiration from
+Spotifast is written in Rust, with [egui](https://www.egui.rs) and
+[fastframe](https://fastframe.dev) for its interface and
+[librespot](https://github.com/librespot-org/librespot) for Spotify playback.
+fastframe is the shared foundation of a family of native apps, including
+Spotifast's sibling [ZapFast](https://zapfast.rocks), a native client for
+WhatsApp. Spotifast takes inspiration from
 [spotify-tui](https://github.com/Rigellute/spotify-tui),
 [spotify-player](https://github.com/aome510/spotify-player),
 [ncspot](https://github.com/hrkfdn/ncspot), and
-[Omarchy Spotify](https://github.com/stappmus/Omarchy-Spotify). Spotifast is
-a sibling of [ZapFast](https://zapfast.rocks), a native client for WhatsApp.
-Both are built on [fastframe](https://github.com/crmne/fastframe), the shared
-foundation for native Rust apps built with egui.
+[Omarchy Spotify](https://github.com/stappmus/Omarchy-Spotify).
 
 Spotifast is an independent project, not affiliated with or endorsed by
 Spotify AB. Spotify is a trademark of Spotify AB.
