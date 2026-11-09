@@ -1301,7 +1301,7 @@ fn lyrics_status(app: &App, ui: &egui::Ui, rect: Rect) {
     let text = if lyrics.lines.iter().any(|line| !line.words.is_empty()) {
         "Letra a letra"
     } else if lyrics.synced {
-        "Linha por linha"
+        "Letra a letra estimada"
     } else {
         "Sem sincronia"
     };
