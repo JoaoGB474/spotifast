@@ -13458,18 +13458,6 @@ impl App {
                         Some(self.lyrics_fullscreen_restoring.take().unwrap_or_else(|| {
                             ctx.input(|input| input.viewport().fullscreen.unwrap_or(false))
                         }));
-                    #[cfg(windows)]
-                    {
-                        // Winit's undecorated maximized Windows client area is
-                        // constrained to the work area, even in fullscreen.
-                        // Clear maximization before entering, then restore it
-                        // together with the original window mode on exit.
-                        self.lyrics_restore_maximized |= self.lyrics_fullscreen == Some(false)
-                            && ctx.input(|input| input.viewport().maximized.unwrap_or(false));
-                        if self.lyrics_restore_maximized {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
-                        }
-                    }
                     self.lyrics_fullscreen_seen = false;
                     // The queue flag is preserved: an open side panel becomes
                     // the fullscreen queue column instead of vanishing. The
@@ -13480,8 +13468,9 @@ impl App {
                     self.show_friends_panel = false;
                     self.lyrics_following = true;
                     self.lyrics_line_shown = None;
+                    // The view fills the window only: the rest of the
+                    // screen stays usable.
                     self.request_lyrics();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
                 } else if !fullscreen {
                     self.leave_lyrics_fullscreen(ctx);
                 }

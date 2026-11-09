@@ -1248,9 +1248,7 @@ pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
                 app.actions.push(Action::ToggleLyricsMilkdrop);
             }
             let chrome = chrome_opacity(ui.ctx());
-            if chrome < 0.01 {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-            } else if chrome < 1.0 {
+            if chrome > 0.01 && chrome < 1.0 {
                 ui.ctx().request_repaint();
             } else {
                 // Look again when the pointer has rested long enough.
