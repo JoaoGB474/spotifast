@@ -104,6 +104,9 @@ struct Look {
     /// The song's pulse, in full screen: the line grows as it is sung, and
     /// its words swell and glow in the cover's colour.
     glow: Option<Glow>,
+    /// When the line became the one sung, while it is; its words assemble
+    /// from around it one after another.
+    since: Option<f64>,
 }
 
 fn idle_opacity(distance: usize, hovered: bool) -> f32 {
@@ -466,8 +469,20 @@ fn word_row(
         }
     }
     let time = ui.input(|input| input.time) as f32;
+    let now = ui.input(|input| input.time);
     for (index, ((word, galley), place)) in words.iter().zip(&galleys).zip(&places).enumerate() {
         let (sung, pop, held) = timing(word);
+        // The words of the line being sung come in from around it.
+        let (assemble, fly) = match (look.glow, look.since) {
+            (Some(_), Some(since)) => {
+                let t = (now - since) as f32 - index as f32 * 0.06;
+                let p = smooth(t / 0.8);
+                (p, 1.0 - p)
+            }
+            _ => (1.0, 0.0),
+        };
+        let spiral = index as f32 * 2.4;
+        let assembling = vec2(spiral.cos(), spiral.sin()) * fly * font.size * 1.6;
         // A word rises as it is sung and stays up until the line lets go.
         let eased = sung * sung * (3.0 - 2.0 * sung);
         // A long note floats while it is held, gently, as if on a breath.
@@ -489,7 +504,7 @@ fn word_row(
             _ => 0.0,
         };
         let lift = lift_by * eased * look.lit + float + ripple;
-        let pos = rect.min + *place - vec2(0.0, lift);
+        let pos = rect.min + *place - vec2(0.0, lift) + assembling;
         let ink = layout_width(word.text, galley);
         let word_rect = Rect::from_min_size(pos, vec2(ink, galley.size().y));
         // The line kicks a little on each beat while it is sung.
@@ -498,8 +513,15 @@ fn word_row(
             * zoom_about(
                 pos2(word_rect.center().x, word_rect.bottom()),
                 1.0 + (0.03 + 0.1 * held) * pop + kick,
-            );
-        paint_galley(&painter, pos, galley, look.color.gamma_multiply(base), zoom);
+            )
+            * zoom_about(word_rect.center(), 0.4 + 0.6 * assemble);
+        paint_galley(
+            &painter,
+            pos,
+            galley,
+            look.color.gamma_multiply(base * assemble),
+            zoom,
+        );
         if look.lit <= 0.001 || sung <= 0.0 {
             continue;
         }
@@ -1026,7 +1048,30 @@ fn lines(
                 Some(last) => now.position_ms < last.end + 600,
                 None => sung < 1.0,
             };
+        let since = if style.glow.is_some() && lyrics.synced {
+            let key = style.id.with(("since", index));
+            let now = ui.input(|input| input.time);
+            let stored = ui.ctx().data(|data| data.get_temp::<f64>(key));
+            match (is_active, stored) {
+                (true, Some(at)) => Some(at),
+                (true, None) => {
+                    ui.ctx().data_mut(|data| data.insert_temp(key, now));
+                    Some(now)
+                }
+                (false, Some(_)) => {
+                    ui.ctx().data_mut(|data| data.remove::<f64>(key));
+                    None
+                }
+                (false, None) => None,
+            }
+        } else {
+            None
+        };
+        if let Some(at) = since {
+            drawn.animating |= ui.input(|input| input.time) - at < 1.5;
+        }
         let look = Look {
+            since,
             color: style.color,
             lit: if lyrics.synced { lit } else { 1.0 },
             sung: if lyrics.synced { sung } else { 1.0 },
