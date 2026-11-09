@@ -211,6 +211,33 @@ impl Fx {
         painter.add(mesh);
     }
 
+    /// The cover's two lights as big soft clouds circling the window on
+    /// slow orbits of their own, swelling on the bass and flaring on the
+    /// beat, so the colours never stop flowing into each other.
+    pub fn aurora(&self, painter: &egui::Painter, rect: Rect, low: Color32, high: Color32, time: f32) {
+        let reach = rect.width().max(rect.height());
+        let clouds = [
+            (low, 0.0, 0.031, 0.62),
+            (high, 2.1, -0.026, 0.55),
+            (mix(low, high, 0.5), 4.2, 0.022, 0.5),
+            (low, 5.3, -0.037, 0.4),
+        ];
+        let mut mesh = Mesh::default();
+        for (color, phase, speed, size) in clouds {
+            let around = time * speed + self.flow * speed * 2.5 + phase;
+            let center = rect.center()
+                + vec2(
+                    around.cos() * rect.width() * 0.36,
+                    (around * 1.4 + phase).sin() * rect.height() * 0.32,
+                );
+            let breathe = 1.0 + 0.08 * (time * 0.3 + phase).sin() + 0.14 * self.bass;
+            let strength = 0.07 + 0.1 * self.level + 0.1 * self.beat;
+            let radii = vec2(1.15, 0.85) * reach * size * breathe;
+            blob(&mut mesh, center, radii, light(color, strength));
+        }
+        painter.add(mesh);
+    }
+
     /// The smoothed spectrum at `at`, from 0 (the lowest band) to 1.
     fn band(&self, at: f32) -> f32 {
         let position = at.clamp(0.0, 1.0) * (vis::WIDE_BANDS - 1) as f32;

@@ -155,6 +155,32 @@ fn gap_fraction(lyrics: &crate::lyrics::Lyrics, index: Option<usize>, position_m
         .clamp(0.0, 1.0)
 }
 
+/// Where a row is drawn while it catches up with where it is laid out: a
+/// spring, slower the farther the row is from the sung line, so a change
+/// of line ripples through the lyrics as a wave. Returns the offset to draw
+/// it at and whether it is still moving.
+fn row_spring(ctx: &egui::Context, id: egui::Id, top: f32, distance: usize, reach: f32) -> (f32, bool) {
+    let dt = ctx.input(|input| input.stable_dt).clamp(0.0, 0.05);
+    let (mut y, mut v) = ctx
+        .data(|data| data.get_temp::<(f32, f32)>(id))
+        .unwrap_or((top, 0.0));
+    if (y - top).abs() > reach {
+        y = top - reach.copysign(top - y);
+    }
+    let stiffness = 150.0 / (1.0 + 0.3 * distance.min(12) as f32);
+    let damping = 2.0 * 0.7 * stiffness.sqrt();
+    // Small steps keep the spring steady at any frame rate.
+    let h = dt / 4.0;
+    for _ in 0..4 {
+        let pull = -stiffness * (y - top) - damping * v;
+        v += pull * h;
+        y += v * h;
+    }
+    ctx.data_mut(|data| data.insert_temp(id, (y, v)));
+    let offset = y - top;
+    (offset, offset.abs() > 0.2 || v.abs() > 2.0)
+}
+
 /// One word of a line and when it is sung.
 struct TimedWord<'a> {
     text: &'a str,
@@ -321,7 +347,11 @@ fn word_row(
         let feather = row_height * 0.6;
         let states: Vec<_> = words.iter().map(&timing).collect();
         let strength =
-            |index: usize| look.lit * (0.5 + 0.5 * states[index].1) * (0.85 + 0.3 * pulse.bass);
+            |index: usize| {
+                look.lit
+                    * (0.4 + 0.85 * states[index].1)
+                    * (0.8 + 0.35 * pulse.bass + 0.25 * pulse.beat)
+            };
         let color = lyrics_fx::mix(pulse.accent, Color32::WHITE, 0.3);
         let mut start = 0;
         while start < words.len() {
@@ -424,18 +454,25 @@ fn word_row(
             painter.add(mesh);
         }
     }
-    for ((word, galley), place) in words.iter().zip(&galleys).zip(&places) {
+    let time = ui.input(|input| input.time) as f32;
+    for (index, ((word, galley), place)) in words.iter().zip(&galleys).zip(&places).enumerate() {
         let (sung, pop, held) = timing(word);
         // A word rises as it is sung and stays up until the line lets go.
         let eased = sung * sung * (3.0 - 2.0 * sung);
-        let lift = lift_by * eased * look.lit;
+        // A long note floats while it is held, gently, as if on a breath.
+        let float = if look.glow.is_some() && held > 0.0 && sung > 0.0 && sung < 1.0 {
+            (time * 3.4 + index as f32).sin() * font.size * 0.06 * held * pop
+        } else {
+            0.0
+        };
+        let lift = lift_by * eased * look.lit + float;
         let pos = rect.min + *place - vec2(0.0, lift);
         let ink = layout_width(word.text, galley);
         let word_rect = Rect::from_min_size(pos, vec2(ink, galley.size().y));
         let zoom = line_zoom
             * zoom_about(
                 pos2(word_rect.center().x, word_rect.bottom()),
-                1.0 + (0.025 + 0.045 * held) * pop,
+                1.0 + (0.03 + 0.1 * held) * pop,
             );
         paint_galley(&painter, pos, galley, look.color.gamma_multiply(base), zoom);
         if look.lit <= 0.001 || sung <= 0.0 {
@@ -884,11 +921,27 @@ fn lines(
             None => index + 1,
         };
         drawn.animating |= lit > 0.0 && lit < 1.0;
+        // In full screen the rows follow on springs, in a staggered wave.
+        let shift = if style.glow.is_some() && lyrics.synced {
+            let (offset, moving) = row_spring(
+                ui.ctx(),
+                style.id.with(("spring", index)),
+                ui.cursor().top(),
+                distance,
+                style.size * 10.0,
+            );
+            drawn.animating |= moving;
+            TSTransform::from_translation(vec2(0.0, offset))
+        } else {
+            TSTransform::IDENTITY
+        };
         // A timed line with no words is the band playing on.
         if line.text.trim().is_empty() && lyrics.synced {
             let through = gap_fraction(lyrics, Some(index), now.position_ms);
             let top = ui.cursor().top();
-            interlude_row(ui, style.color, style.size, lit, through, style.glow);
+            ui.with_visual_transform(shift, |ui| {
+                interlude_row(ui, style.color, style.size, lit, through, style.glow);
+            });
             if lit > 0.0 {
                 ui.add_space(style.gap * lit);
             }
@@ -947,11 +1000,14 @@ fn lines(
         let response = ui
             .scope(|ui| {
                 ui.multiply_opacity(edge);
-                if words.is_empty() {
-                    lyric_row(ui, &line.text, font.clone(), look, sense)
-                } else {
-                    word_row(ui, &words, font.clone(), look, now.position_ms, sense)
-                }
+                ui.with_visual_transform(shift, |ui| {
+                    if words.is_empty() {
+                        lyric_row(ui, &line.text, font.clone(), look, sense)
+                    } else {
+                        word_row(ui, &words, font.clone(), look, now.position_ms, sense)
+                    }
+                })
+                .inner
             })
             .inner;
         if style.autoscroll_rows {
@@ -1865,6 +1921,7 @@ fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
             .request_repaint_after(std::time::Duration::from_millis(33));
     }
     painter.rect_filled(rect, 0.0, Color32::from_black_alpha(72));
+    fx.aurora(&painter, rect, low, high, time);
     fx.wave(&painter, rect, low, high);
     fx.embers(&painter, rect, low, time);
     lyrics_fx::vignette(&painter, rect, 0.5);
