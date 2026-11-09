@@ -779,6 +779,7 @@ pub fn from_text(text: &str) -> Option<Lyrics> {
             .map(|line| Line {
                 at_ms: None,
                 text: line.trim_end().to_string(),
+                words: Vec::new(),
             })
             .collect(),
         synced: false,
