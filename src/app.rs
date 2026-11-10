@@ -14857,6 +14857,14 @@ impl App {
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
             let full = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
+            // Windows keeps the taskbar above an ordinary window, so the full
+            // screen window is lifted above it too while it is full screen.
+            let level = if full {
+                egui::WindowLevel::Normal
+            } else {
+                egui::WindowLevel::AlwaysOnTop
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
         }
         // Switch to the main window when sign-in is required.
         let needs_sign_in = !(self.is_connected() && self.user.is_some())
