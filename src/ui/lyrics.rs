@@ -472,17 +472,16 @@ fn word_row(
     let now = ui.input(|input| input.time);
     for (index, ((word, galley), place)) in words.iter().zip(&galleys).zip(&places).enumerate() {
         let (sung, pop, held) = timing(word);
-        // The words of the line being sung come in from around it.
-        let (assemble, fly) = match (look.glow, look.since) {
-            (Some(_), Some(since)) => {
-                let t = (now - since) as f32 - index as f32 * 0.06;
-                let p = smooth(t / 0.8);
-                (p, 1.0 - p)
-            }
-            _ => (1.0, 0.0),
+        // A line being sung shows its letters one by one: each fades in, and
+        // the next follows as the singing goes on.
+        let typing = match (look.glow, look.since) {
+            (Some(_), Some(since)) => Some(since),
+            _ => None,
         };
-        let spiral = index as f32 * 2.4;
-        let assembling = vec2(spiral.cos(), spiral.sin()) * fly * font.size * 1.6;
+        let assemble = match typing {
+            Some(since) => smooth(((now - since) as f32 - index as f32 * 0.12) / 0.6),
+            None => 1.0,
+        };
         // A word rises as it is sung and stays up until the line lets go.
         let eased = sung * sung * (3.0 - 2.0 * sung);
         // A long note floats while it is held, gently, as if on a breath.
@@ -504,7 +503,7 @@ fn word_row(
             _ => 0.0,
         };
         let lift = lift_by * eased * look.lit + float + ripple;
-        let pos = rect.min + *place - vec2(0.0, lift) + assembling;
+        let pos = rect.min + *place - vec2(0.0, lift);
         let ink = layout_width(word.text, galley);
         let word_rect = Rect::from_min_size(pos, vec2(ink, galley.size().y));
         // The line kicks a little on each beat while it is sung.
@@ -514,21 +513,54 @@ fn word_row(
                 pos2(word_rect.center().x, word_rect.bottom()),
                 1.0 + (0.03 + 0.1 * held) * pop + kick,
             )
-            * zoom_about(word_rect.center(), 0.4 + 0.6 * assemble);
-        paint_galley(
-            &painter,
-            pos + vec2(0.0, 1.5),
-            galley,
-            Color32::from_black_alpha(140).gamma_multiply(base * assemble),
-            zoom,
-        );
-        paint_galley(
-            &painter,
-            pos,
-            galley,
-            look.color.gamma_multiply(base * assemble),
-            zoom,
-        );
+;
+        if let (Some(since), true) = (typing, assemble < 1.0) {
+            // Letter by letter, each one fading up out of the line's glow.
+            let before: usize = words[..index].iter().map(|w| w.text.chars().count()).sum();
+            let mut prefix = String::new();
+            for (j, ch) in word.text.chars().enumerate() {
+                let x = painter
+                    .layout_no_wrap(prefix.clone(), font.clone(), look.color)
+                    .size()
+                    .x;
+                prefix.push(ch);
+                let p = smooth(((now - since) as f32 - (before + j) as f32 * 0.035) / 0.35);
+                if ch.is_whitespace() || p <= 0.0 {
+                    continue;
+                }
+                let glyph = painter.layout_no_wrap(ch.to_string(), font.clone(), look.color);
+                let at = pos + vec2(x, (1.0 - p) * font.size * 0.12);
+                paint_galley(
+                    &painter,
+                    at + vec2(0.0, 1.5),
+                    &glyph,
+                    Color32::from_black_alpha(140).gamma_multiply(p * base),
+                    zoom,
+                );
+                paint_galley(
+                    &painter,
+                    at,
+                    &glyph,
+                    look.color.gamma_multiply(base * p),
+                    zoom,
+                );
+            }
+        } else {
+            paint_galley(
+                &painter,
+                pos + vec2(0.0, 1.5),
+                galley,
+                Color32::from_black_alpha(140).gamma_multiply(base),
+                zoom,
+            );
+            paint_galley(
+                &painter,
+                pos,
+                galley,
+                look.color.gamma_multiply(base),
+                zoom,
+            );
+        }
         if look.lit <= 0.001 || sung <= 0.0 {
             continue;
         }
