@@ -161,7 +161,7 @@ impl Fx {
             let twinkle = 0.55
                 + 0.45 * (time * (0.7 + 2.2 * seed(5)) + seed(6) * std::f32::consts::TAU).sin();
             let strength =
-                life * twinkle * (0.07 + 0.2 * self.level + 0.06 * self.beat) * (0.4 + depth);
+                life * twinkle * (0.07 + 0.2 * self.level) * (0.4 + depth);
             if strength < 0.004 {
                 continue;
             }
@@ -231,7 +231,7 @@ impl Fx {
                     (around * 1.4 + phase).sin() * rect.height() * 0.32,
                 );
             let breathe = 1.0 + 0.05 * (time * 0.2 + phase).sin() + 0.1 * self.bass;
-            let strength = 0.07 + 0.1 * self.level + 0.1 * self.beat;
+            let strength = 0.07 + 0.1 * self.level;
             let radii = vec2(1.15, 0.85) * reach * size * breathe;
             blob(&mut mesh, center, radii, light(color, strength));
         }

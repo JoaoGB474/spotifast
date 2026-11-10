@@ -514,7 +514,7 @@ fn word_row(
                 1.0 + (0.03 + 0.1 * held) * pop + kick,
             )
 ;
-        if let (Some(since), true) = (typing, assemble < 1.0) {
+        if typing.is_some() {
             // Letter by letter, each one fading up out of the line's glow.
             let before: usize = words[..index].iter().map(|w| w.text.chars().count()).sum();
             let mut prefix = String::new();
@@ -524,12 +524,16 @@ fn word_row(
                     .size()
                     .x;
                 prefix.push(ch);
-                let p = smooth(((now - since) as f32 - (before + j) as f32 * 0.035) / 0.35);
+                let total = word.text.chars().count().max(1) as f32;
+                let span = word.end.saturating_sub(word.start).max(1) as f32;
+                let sung_at = word.start as f32 + span * (j as f32 / total);
+                let p = smooth((position_ms as f32 - sung_at) / 180.0);
                 if ch.is_whitespace() || p <= 0.0 {
                     continue;
                 }
                 let glyph = painter.layout_no_wrap(ch.to_string(), font.clone(), look.color);
-                let at = pos + vec2(x, (1.0 - p) * font.size * 0.12);
+                let side = if j % 2 == 0 { -1.0 } else { 1.0 };
+                let at = pos + vec2(x, side * (1.0 - p) * font.size * 0.6);
                 paint_galley(
                     &painter,
                     at + vec2(0.0, 1.5),
@@ -854,7 +858,7 @@ fn dynamic_backdrop(
         let breathe = 1.0 + 0.06 * (time * 0.11 + phase).sin() + 0.035 * fx.bass;
         let center = rect.min + (at + drift) * rect.size();
         let angle = (time + fx.flow * 1.5) * speed + phase;
-        let gray = (gray as f32 + 12.0 * fx.beat).min(255.0) as u8;
+        let gray = gray as u8;
         paint_disc(
             painter,
             texture.id(),
@@ -870,7 +874,7 @@ fn dynamic_backdrop(
         (2.1, -0.27, 0.3, 0.34),
         (4.2, 0.19, -0.26, 0.3),
     ];
-    let strength = 0.08 + 0.12 * fx.level + 0.03 * fx.beat;
+    let strength = 0.08 + 0.12 * fx.level;
     for (phase, turn, orbit, radius) in lights {
         let around = fx.flow * orbit + phase;
         let center = rect.center()
