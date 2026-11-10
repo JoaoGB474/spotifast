@@ -14856,6 +14856,12 @@ impl App {
         }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
             let full = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+            let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+            if !full && maximized {
+                // Windows holds a maximized frameless window to the work area,
+                // which leaves the taskbar showing: clear it before going full.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
             // Windows keeps the taskbar above an ordinary window, so the full
             // screen window is lifted above it too while it is full screen.
