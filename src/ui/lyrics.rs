@@ -508,10 +508,17 @@ fn word_row(
         let word_rect = Rect::from_min_size(pos, vec2(ink, galley.size().y));
         // The line kicks a little on each beat while it is sung.
         let kick = look.glow.map_or(0.0, |glow| 0.035 * glow.beat * look.lit);
+        // The word being sung keeps breathing while it is held, so the line
+        // never stops moving between the letters.
+        let breath = if look.glow.is_some() && sung > 0.0 && sung < 1.0 {
+            0.03 * (time * 7.0 + index as f32 * 0.5).sin() * look.lit
+        } else {
+            0.0
+        };
         let zoom = line_zoom
             * zoom_about(
                 pos2(word_rect.center().x, word_rect.bottom()),
-                1.0 + (0.03 + 0.1 * held) * pop + kick,
+                1.0 + (0.03 + 0.1 * held) * pop + kick + breath,
             )
 ;
         if typing.is_some() {
