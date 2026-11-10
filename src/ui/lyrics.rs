@@ -527,13 +527,30 @@ fn word_row(
                 let total = word.text.chars().count().max(1) as f32;
                 let span = word.end.saturating_sub(word.start).max(1) as f32;
                 let sung_at = word.start as f32 + span * (j as f32 / total);
-                let p = smooth((position_ms as f32 - sung_at) / 180.0);
+                let p = smooth((position_ms as f32 - sung_at) / 260.0);
                 if ch.is_whitespace() || p <= 0.0 {
                     continue;
                 }
                 let glyph = painter.layout_no_wrap(ch.to_string(), font.clone(), look.color);
                 let side = if j % 2 == 0 { -1.0 } else { 1.0 };
                 let at = pos + vec2(x, side * (1.0 - p) * font.size * 0.6);
+                // Each letter lands with a small overshoot, scaled from its
+                // own centre, and a soft flash of the cover's colour as it
+                // is sung.
+                let glyph_size = glyph.size();
+                let grow = 0.6 + 0.4 * p + 0.14 * (std::f32::consts::PI * p).sin();
+                let zoom = zoom * zoom_about(at + glyph_size * 0.5, grow);
+                if let Some(pulse) = look.glow {
+                    let flash = (std::f32::consts::PI * p).sin() * 0.35 * look.lit;
+                    if flash > 0.01 {
+                        lyrics_fx::paint_blob(
+                            &painter,
+                            at + glyph_size * 0.5,
+                            glyph_size * 1.4,
+                            light(pulse.accent, flash),
+                        );
+                    }
+                }
                 paint_galley(
                     &painter,
                     at + vec2(0.0, 1.5),
