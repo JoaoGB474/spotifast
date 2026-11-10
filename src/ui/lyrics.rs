@@ -86,6 +86,14 @@ fn paint_galley(
     painter.add(shape);
 }
 
+/// Eases out past the end and settles back, so a thing snaps into place.
+fn ease_out_back(t: f32) -> f32 {
+    let c1 = 1.70158;
+    let c3 = c1 + 1.0;
+    let t = t.clamp(0.0, 1.0) - 1.0;
+    1.0 + c3 * t * t * t + c1 * t * t
+}
+
 fn smooth(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -540,12 +548,15 @@ fn word_row(
                 }
                 let glyph = painter.layout_no_wrap(ch.to_string(), font.clone(), look.color);
                 let side = if j % 2 == 0 { -1.0 } else { 1.0 };
-                let at = pos + vec2(x, side * (1.0 - p) * font.size * 0.6);
+                // Each letter flies in from further out and snaps into its
+                // place with a small overshoot, like a letter locking in.
+                let back = ease_out_back(p);
+                let at = pos + vec2(x, side * (1.0 - back) * font.size * 1.1);
                 // Each letter lands with a small overshoot, scaled from its
                 // own centre, and a soft flash of the cover's colour as it
                 // is sung.
                 let glyph_size = glyph.size();
-                let grow = 0.6 + 0.4 * p + 0.14 * (std::f32::consts::PI * p).sin();
+                let grow = 1.5 - 0.5 * back;
                 let zoom = zoom * zoom_about(at + glyph_size * 0.5, grow);
                 if let Some(pulse) = look.glow {
                     let flash = (std::f32::consts::PI * p).sin() * 0.35 * look.lit;
