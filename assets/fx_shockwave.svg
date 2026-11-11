@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="neon" x1="64" y1="64" x2="448" y2="448" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00FFFF"/>
+      <stop offset=".32" stop-color="#A020FF"/>
+      <stop offset=".65" stop-color="#FF16D8"/>
+      <stop offset="1" stop-color="#00EFFF"/>
+    </linearGradient>
+    <radialGradient id="aura">
+      <stop stop-color="#F59AFF" stop-opacity=".7"/>
+      <stop offset=".12" stop-color="#FF00D4" stop-opacity=".28"/>
+      <stop offset=".42" stop-color="#A000FF" stop-opacity=".04"/>
+      <stop offset=".78" stop-color="#A000FF" stop-opacity=".13"/>
+      <stop offset=".9" stop-color="#00FFFF" stop-opacity=".1"/>
+      <stop offset="1" stop-color="#00FFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="core">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset=".18" stop-color="#E4FFFF" stop-opacity=".95"/>
+      <stop offset=".4" stop-color="#FF4DE5" stop-opacity=".65"/>
+      <stop offset="1" stop-color="#BD00FF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="7" result="wide"/>
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="tight"/>
+      <feMerge>
+        <feMergeNode in="wide"/>
+        <feMergeNode in="tight"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <g id="shockwave" style="transform-origin:256px 256px">
+    <circle cx="256" cy="256" r="248" fill="url(#aura)"/>
+    <g id="ripples" stroke="url(#neon)" filter="url(#glow)">
+      <circle cx="256" cy="256" r="220" stroke-width="2" opacity=".55"/>
+      <circle cx="256" cy="256" r="211" stroke-width=".8" opacity=".4"/>
+      <circle cx="256" cy="256" r="186" stroke-width="5"/>
+      <circle cx="256" cy="256" r="178" stroke-width="1.2" opacity=".65"/>
+      <circle cx="256" cy="256" r="145" stroke-width="3.5" opacity=".9"/>
+      <circle cx="256" cy="256" r="136" stroke-width=".7" opacity=".45"/>
+      <circle cx="256" cy="256" r="101" stroke-width="3" opacity=".85"/>
+      <circle cx="256" cy="256" r="61" stroke-width="2" opacity=".7"/>
+      <circle cx="256" cy="256" r="29" stroke-width="1.5" opacity=".9"/>
+    </g>
+    <g id="impact-core">
+      <circle cx="256" cy="256" r="53" fill="url(#core)"/>
+      <path d="M256 215L260 252L297 256L260 260L256 297L252 260L215 256L252 252Z" fill="#FF8BF0"/>
+      <path d="M256 233L258 254L279 256L258 258L256 279L254 258L233 256L254 254Z" fill="#EFFFFF"/>
+      <circle cx="256" cy="256" r="4" fill="white"/>
+    </g>
+  </g>
+</svg>

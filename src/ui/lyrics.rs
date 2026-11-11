@@ -2117,7 +2117,9 @@ fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
     painter.rect_filled(rect, 0.0, Color32::from_black_alpha(115));
     fx.aurora(&painter, rect, low, high, time);
     fx.wave(&painter, rect, low, high);
-    fx.embers(&painter, rect, low, time);
+    fx.shockwave_effect(&painter, rect, low, time);
+    fx.burst_effect(&painter, rect, high, time);
+    fx.embers(&painter, rect, high, time);
     lyrics_fx::vignette(&painter, rect, 0.5);
     widgets::paint_vertical_gradient(
         ui,

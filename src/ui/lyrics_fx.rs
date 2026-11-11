@@ -6,6 +6,24 @@ use egui::{Color32, Mesh, Pos2, Rect, Vec2, pos2, vec2};
 
 use crate::vis;
 
+/// Burst effect state: animated geometric particles that explode on beat.
+#[derive(Clone, Copy)]
+pub struct Burst {
+    /// How strong the burst is, from 0 to 1. Triggered by beat, fades fast.
+    pub intensity: f32,
+    /// Rotation of the pattern, accelerates during burst.
+    pub spin: f32,
+}
+
+/// Shockwave effect: concentric ripples expanding on bass hit.
+#[derive(Clone, Copy)]
+pub struct Shockwave {
+    /// How strong the wave is, from 0 to 1. Triggered by bass, fades medium.
+    pub intensity: f32,
+    /// Scale of the ripples, expands on strong bass.
+    pub scale: f32,
+}
+
 /// Samples read for the loudness and the beat, about a fortieth of a second.
 const PULSE_SAMPLES: usize = 1_024;
 /// How much of each sample the bass filter lets through: a one-pole
@@ -43,6 +61,10 @@ pub struct Fx {
     /// Whether any sound reached the tap lately; without it the pulse
     /// breathes on its own.
     heard: f32,
+    /// Burst effect: explodes on beat.
+    pub burst: Burst,
+    /// Shockwave effect: ripples on bass.
+    pub shockwave: Shockwave,
 }
 
 impl Default for Fx {
@@ -59,6 +81,14 @@ impl Default for Fx {
             flow: 0.0,
             colors: lights(None),
             heard: 0.0,
+            burst: Burst {
+                intensity: 0.0,
+                spin: 0.0,
+            },
+            shockwave: Shockwave {
+                intensity: 0.0,
+                scale: 1.0,
+            },
         }
     }
 }
@@ -130,6 +160,12 @@ impl Fx {
             self.level = follow(self.level, breath, dt, 3.0, 3.0);
         }
         self.flow += dt * (0.35 + 1.4 * self.level + 1.2 * self.beat);
+
+        self.burst.spin += dt * (2.0 + 8.0 * self.beat);
+        self.burst.intensity = follow(self.burst.intensity, self.beat, dt, 5.0, 8.0);
+
+        self.shockwave.scale = 1.0 + 0.8 * self.shockwave.intensity;
+        self.shockwave.intensity = follow(self.shockwave.intensity, self.bass, dt, 3.0, 6.0);
     }
 
     pub fn glow(&self, accent: Color32) -> Glow {
@@ -142,7 +178,94 @@ impl Fx {
 
     /// Whether anything is still moving and wants another frame.
     pub fn moving(&self) -> bool {
-        self.level > 0.005 || self.beat > 0.005
+        self.level > 0.005
+            || self.beat > 0.005
+            || self.burst.intensity > 0.005
+            || self.shockwave.intensity > 0.005
+    }
+
+    /// Burst of geometric particles exploding from center on beat.
+    pub fn burst_effect(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        accent: Color32,
+        time: f32,
+    ) {
+        if self.burst.intensity < 0.01 {
+            return;
+        }
+        let center = rect.center();
+        let reach = rect.width().max(rect.height()) * 0.3;
+        const RAYS: usize = 12;
+        const SHARDS_PER_RAY: usize = 5;
+        let mut mesh = Mesh::default();
+
+        for ray in 0..RAYS {
+            let angle = ray as f32 * std::f32::consts::TAU / RAYS as f32 + self.burst.spin;
+            for shard in 0..SHARDS_PER_RAY {
+                let depth = (shard as f32 + 1.0) / SHARDS_PER_RAY as f32;
+                let distance = reach * depth * (1.0 + 0.5 * self.burst.intensity);
+                let pos = center + vec2(angle.cos(), angle.sin()) * distance;
+
+                let t = depth * (1.0 - self.burst.intensity.powf(1.5));
+                let pulse = 0.6 + 0.4 * (time * 6.0 + ray as f32).sin();
+                let strength = self.burst.intensity * (1.0 - t) * pulse * 0.4;
+
+                let color = if (ray + shard) % 3 == 0 {
+                    mix(accent, Color32::WHITE, 0.5)
+                } else {
+                    accent
+                };
+
+                let size = vec2(2.0 + 3.0 * depth, 2.0 + 3.0 * depth);
+                blob(&mut mesh, pos, size, light(color, strength));
+            }
+        }
+        painter.add(mesh);
+    }
+
+    /// Shockwave: concentric expanding ripples on bass hit.
+    pub fn shockwave_effect(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        accent: Color32,
+        time: f32,
+    ) {
+        if self.shockwave.intensity < 0.01 {
+            return;
+        }
+        let center = rect.center();
+        let reach = rect.width().max(rect.height()) * 0.5 * self.shockwave.scale;
+        const RIPPLES: usize = 8;
+        let mut mesh = Mesh::default();
+
+        for ripple in 0..RIPPLES {
+            let base_radius = reach * (ripple as f32 + 1.0) / RIPPLES as f32;
+            let pulse_offset = (time * 4.0 + ripple as f32 * 0.3).sin() * 0.05;
+            let radius = base_radius * (1.0 + pulse_offset);
+
+            let t = ripple as f32 / RIPPLES as f32;
+            let alpha = (1.0 - t) * self.shockwave.intensity;
+            let color = if ripple % 2 == 0 {
+                mix(accent, Color32::WHITE, 0.6)
+            } else {
+                accent
+            };
+
+            const SEGMENTS: u32 = 64;
+            for segment in 0..SEGMENTS {
+                let theta = segment as f32 * std::f32::consts::TAU / SEGMENTS as f32;
+                let (sin, cos) = theta.sin_cos();
+                let out = vec2(cos * radius, sin * radius);
+                let pos = center + out;
+
+                let pulse = 0.4 + 0.6 * ((time * 8.0 + segment as f32 * 0.05).sin() * 0.5 + 0.5);
+                blob(&mut mesh, pos, vec2(1.5, 1.5), light(color, alpha * pulse * 0.3));
+            }
+        }
+        painter.add(mesh);
     }
 
     /// Embers drifting up `rect`, faster and brighter while the song is
