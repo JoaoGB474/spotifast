@@ -99,6 +99,12 @@ fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// How much smaller a backing vocal is than the lead, how long before it
+/// starts it appears, and how long it stays once it is sung.
+const BACKING_SCALE: f32 = 0.62;
+const BACKING_LEAD_MS: u32 = 400;
+const BACKING_HOLD_MS: u32 = 700;
+
 /// What one row of the lyrics shows this frame.
 #[derive(Clone, Copy)]
 struct Look {
@@ -115,6 +121,8 @@ struct Look {
     /// When the line became the one sung, while it is; its words assemble
     /// from around it one after another.
     since: Option<f64>,
+    /// Sung from the other side: the line's rows sit against the right edge.
+    right: bool,
 }
 
 fn idle_opacity(distance: usize, hovered: bool) -> f32 {
@@ -313,6 +321,23 @@ fn word_row(
         x += galley.size().x;
     }
     let height = y + row_height;
+    if look.right {
+        // Each row against the right edge, the way a second voice answers.
+        let mut start = 0;
+        while start < places.len() {
+            let row_y = places[start].y;
+            let end = (start..places.len())
+                .find(|index| places[*index].y != row_y)
+                .unwrap_or(places.len());
+            let last = end - 1;
+            let ink = places[last].x + layout_width(words[last].text, &galleys[last]);
+            let slack = (width - ink).max(0.0);
+            for place in &mut places[start..end] {
+                place.x += slack;
+            }
+            start = end;
+        }
+    }
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), sense);
     if !ui.is_rect_visible(rect) {
         return response;
@@ -327,7 +352,14 @@ fn word_row(
     // being sung.
     let line_zoom = match look.glow {
         Some(_) => zoom_about(
-            pos2(rect.left(), rect.center().y),
+            pos2(
+                if look.right {
+                    rect.right()
+                } else {
+                    rect.left()
+                },
+                rect.center().y,
+            ),
             IDLE_SCALE + (1.0 - IDLE_SCALE) * smooth(look.lit),
         ),
         None => TSTransform::IDENTITY,
@@ -363,12 +395,11 @@ fn word_row(
         let pad = row_height * 0.8;
         let feather = row_height * 0.6;
         let states: Vec<_> = words.iter().map(&timing).collect();
-        let strength =
-            |index: usize| {
-                look.lit
-                    * (0.08 + 0.18 * states[index].1)
-                    * (0.6 + 0.15 * pulse.bass + 0.1 * pulse.beat)
-            };
+        let strength = |index: usize| {
+            look.lit
+                * (0.08 + 0.18 * states[index].1)
+                * (0.6 + 0.15 * pulse.bass + 0.1 * pulse.beat)
+        };
         // Softer and less bright than the cover's colour, so the words on
         // top stay readable.
         let color = lyrics_fx::mix(pulse.accent, Color32::BLACK, 0.15);
@@ -527,8 +558,7 @@ fn word_row(
             * zoom_about(
                 pos2(word_rect.center().x, word_rect.bottom()),
                 1.0 + (0.03 + 0.1 * held) * pop + kick + breath,
-            )
-;
+            );
         if typing.is_some() {
             // Letter by letter, each one fading up out of the line's glow.
             let before: usize = words[..index].iter().map(|w| w.text.chars().count()).sum();
@@ -592,13 +622,7 @@ fn word_row(
                 Color32::from_black_alpha(140).gamma_multiply(base),
                 zoom,
             );
-            paint_galley(
-                &painter,
-                pos,
-                galley,
-                look.color.gamma_multiply(base),
-                zoom,
-            );
+            paint_galley(&painter, pos, galley, look.color.gamma_multiply(base), zoom);
         }
         if look.lit <= 0.001 || sung <= 0.0 {
             continue;
@@ -1155,6 +1179,7 @@ fn lines(
             sung: if lyrics.synced { sung } else { 1.0 },
             distance: if lyrics.synced { distance } else { 0 },
             glow: glow_here.filter(|_| lyrics.synced),
+            right: line.opposite,
         };
         let sense = if lyrics.synced {
             Sense::click()
@@ -1172,11 +1197,74 @@ fn lines(
             .scope(|ui| {
                 ui.multiply_opacity(edge * enter * (1.0 - 0.3 * shine));
                 ui.with_visual_transform(shift, |ui| {
-                    if words.is_empty() {
+                    let row = if words.is_empty() {
                         lyric_row(ui, &line.text, font.clone(), look, sense)
                     } else {
                         word_row(ui, &words, font.clone(), look, now.position_ms, sense)
+                    };
+                    // Backing vocals: smaller, under the lead, each lit in
+                    // its own time.
+                    if lyrics.synced && !words.is_empty() {
+                        for (voice, background) in line.background.iter().enumerate() {
+                            let voice_words: Vec<TimedWord<'_>> = background
+                                .words
+                                .iter()
+                                .enumerate()
+                                .map(|(i, word)| TimedWord {
+                                    text: &word.text,
+                                    start: word.at_ms,
+                                    end: word
+                                        .end_ms
+                                        .or_else(|| background.words.get(i + 1).map(|w| w.at_ms))
+                                        .unwrap_or(background.end_ms)
+                                        .max(word.at_ms + 1),
+                                })
+                                .collect();
+                            let heard = now.position_ms + BACKING_LEAD_MS >= background.at_ms
+                                && now.position_ms < background.end_ms + BACKING_HOLD_MS;
+                            let shown = ui.ctx().animate_bool_with_time(
+                                style.id.with((index, "backing", voice)),
+                                heard,
+                                style.light_up,
+                            );
+                            drawn.animating |=
+                                (shown > 0.0 && shown < 1.0) || (heard && now.playing);
+                            let first = voice_words.first().map_or(0, |word| word.start);
+                            let last = voice_words.last().map_or(1, |word| word.end);
+                            let through = if now.position_ms >= last {
+                                1.0
+                            } else {
+                                (now.position_ms.saturating_sub(first) as f32
+                                    / last.saturating_sub(first).max(1) as f32)
+                                    .clamp(0.0, 0.999)
+                            };
+                            let backing = Look {
+                                color: look.color.gamma_multiply(0.8),
+                                lit: shown * look.lit,
+                                sung: if is_active || index < active.unwrap_or(0) {
+                                    through
+                                } else {
+                                    0.0
+                                },
+                                glow: None,
+                                since: None,
+                                ..look
+                            };
+                            ui.add_space(style.size * 0.1);
+                            ui.scope(|ui| {
+                                ui.multiply_opacity(0.55 + 0.45 * shown);
+                                word_row(
+                                    ui,
+                                    &voice_words,
+                                    theme::lyrics(style.size * BACKING_SCALE),
+                                    backing,
+                                    now.position_ms,
+                                    Sense::hover(),
+                                );
+                            });
+                        }
                     }
+                    row
                 })
                 .inner
             })
@@ -1579,9 +1667,14 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
         if app.show_queue_panel {
             // The cover docks left; the lyrics take the middle that remains.
             let room = lyrics_end - below.left();
-            let side = (room * 0.42).min(below.height() - COVER_CAPTION).clamp(160.0, 520.0);
+            let side = (room * 0.42)
+                .min(below.height() - COVER_CAPTION)
+                .clamp(160.0, 520.0);
             let column = Rect::from_min_size(
-                pos2(below.left(), below.center().y - (side + COVER_CAPTION) / 2.0),
+                pos2(
+                    below.left(),
+                    below.center().y - (side + COVER_CAPTION) / 2.0,
+                ),
                 vec2(side, side + COVER_CAPTION),
             );
             big_cover(app, ui, column, Align::Min);
@@ -2397,6 +2490,7 @@ mod tests {
                     at_ms: Some(*at_ms),
                     text: (*text).to_string(),
                     words: Vec::new(),
+                    ..Default::default()
                 })
                 .collect(),
             synced: true,

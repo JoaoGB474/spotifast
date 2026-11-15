@@ -16178,6 +16178,7 @@ mod tests {
                         at_ms: Some(i * 5000),
                         text: format!("Autoscroll lyric line {i}"),
                         words: Vec::new(),
+                        ..Default::default()
                     })
                     .collect(),
                 synced: true,

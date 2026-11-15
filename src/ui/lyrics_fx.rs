@@ -185,13 +185,7 @@ impl Fx {
     }
 
     /// Burst of geometric particles exploding from center on beat.
-    pub fn burst_effect(
-        &self,
-        painter: &egui::Painter,
-        rect: Rect,
-        accent: Color32,
-        time: f32,
-    ) {
+    pub fn burst_effect(&self, painter: &egui::Painter, rect: Rect, accent: Color32, time: f32) {
         if self.burst.intensity < 0.01 {
             return;
         }
@@ -262,7 +256,12 @@ impl Fx {
                 let pos = center + out;
 
                 let pulse = 0.4 + 0.6 * ((time * 8.0 + segment as f32 * 0.05).sin() * 0.5 + 0.5);
-                blob(&mut mesh, pos, vec2(1.5, 1.5), light(color, alpha * pulse * 0.3));
+                blob(
+                    &mut mesh,
+                    pos,
+                    vec2(1.5, 1.5),
+                    light(color, alpha * pulse * 0.3),
+                );
             }
         }
         painter.add(mesh);
@@ -283,8 +282,7 @@ impl Fx {
             let life = (rise * 6.0).min(1.0) * ((1.0 - rise) * 5.0).min(1.0);
             let twinkle = 0.55
                 + 0.45 * (time * (0.7 + 2.2 * seed(5)) + seed(6) * std::f32::consts::TAU).sin();
-            let strength =
-                life * twinkle * (0.07 + 0.2 * self.level) * (0.4 + depth);
+            let strength = life * twinkle * (0.07 + 0.2 * self.level) * (0.4 + depth);
             if strength < 0.004 {
                 continue;
             }
@@ -337,7 +335,14 @@ impl Fx {
     /// The cover's two lights as big soft clouds circling the window on
     /// slow orbits of their own, swelling on the bass and flaring on the
     /// beat, so the colours never stop flowing into each other.
-    pub fn aurora(&self, painter: &egui::Painter, rect: Rect, low: Color32, high: Color32, time: f32) {
+    pub fn aurora(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        low: Color32,
+        high: Color32,
+        time: f32,
+    ) {
         let reach = rect.width().max(rect.height());
         let clouds = [
             (low, 0.0, 0.031, 0.62),

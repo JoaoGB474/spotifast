@@ -878,6 +878,7 @@ fn sample_lyrics() -> crate::lyrics::Lyrics {
                 at_ms: Some(*at_ms),
                 text: (*text).to_string(),
                 words: Vec::new(),
+                ..Default::default()
             })
             .collect(),
         synced: true,
